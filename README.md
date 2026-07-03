@@ -12,7 +12,11 @@ transformers.js (ONNX); the model downloads once (~30MB) and works offline after
 
 ```sh
 npm i -g @kipachu/omem     # or: npx @kipachu/omem setup
-omem setup                 # interactive: vault, git sync, first index, Claude Code registration
+omem setup                 # interactive: vault, git sync, first index, MCP registration
+omem agents                # re-run detection anytime: finds Claude Code, Codex, pi, Cursor,
+                           # Windsurf, Gemini CLI, opencode, Claude Desktop, VS Code and
+                           # offers to register the omem MCP server in each
+omem update                # self-update to the latest npm release
 ```
 
 Config lives at `~/.config/omem/config.json` (chmod 600; may hold an optional GitHub PAT).

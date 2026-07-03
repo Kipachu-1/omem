@@ -106,5 +106,5 @@ test('malformed config file warns but does not break --vault', () => {
   mkdirSync(join(cfgHome, 'omem'), { recursive: true })
   writeFileSync(join(cfgHome, 'omem', 'config.json'), '{ not json')
   const out = execFileSync(process.execPath, [CLI, 'stats', '--vault', vault], { encoding: 'utf8', env: childEnv() })
-  assert.match(out, /notes:/)
+  assert.match(out, /notes/)
 })

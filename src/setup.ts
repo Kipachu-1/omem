@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { readConfigFile, writeConfigFile, type OmemConfig } from './config.ts'
+import { bold, dim, cyan, ok, warn, spin } from './ui.ts'
 
 const run = promisify(execFile)
 const expand = (p: string): string => (p === '~' || p.startsWith('~/') ? join(homedir(), p.slice(1)) : p)
@@ -38,7 +39,7 @@ export async function runSetup(): Promise<void> {
   const nextLine = (): Promise<string> =>
     lines.length ? Promise.resolve(lines.shift()!) : closed ? Promise.resolve('') : new Promise(r => waiters.push(r))
   const ask = async (q: string, def = ''): Promise<string> => {
-    process.stderr.write(`${q}${def ? ` [${def}]` : ''}: `)
+    process.stderr.write(`${bold(q)}${def ? dim(` [${def}]`) : ''}: `)
     return (await nextLine()).trim() || def
   }
   const askInt = async (q: string, def: number): Promise<number> => {
@@ -54,7 +55,7 @@ export async function runSetup(): Promise<void> {
   }
 
   const prev = readConfigFile()
-  console.error('omem setup — Enter accepts the [default]\n')
+  console.error(`${bold(cyan('omem setup'))} ${dim('— Enter accepts the [default]')}\n`)
 
   let vault: string
   for (;;) {
@@ -103,46 +104,37 @@ export async function runSetup(): Promise<void> {
     ...(prev.dbPath ? { dbPath: prev.dbPath } : {}),
   }
   const path = writeConfigFile(cfg)
-  console.error(`\nsaved ${path}${githubToken ? ' (contains your token — file mode 600)' : ''}\n`)
+  console.error('')
+  ok(`saved ${path}${githubToken ? dim(' (contains your token — file mode 600)') : ''}`)
+  console.error('')
 
   if (await yes('index the vault now? (first run downloads a ~30MB embedding model)')) {
     const { openDb } = await import('./db.ts')
     const { fullIndex, embedPending } = await import('./indexer.ts')
     const { localEmbedder } = await import('./embed.ts')
     const db = openDb(cfg.dbPath ? expand(cfg.dbPath) : join(vault, '.omem', 'index.db'))
+    const sp = spin('indexing')
     const s = fullIndex(db, vault)
-    console.error(`  indexed ${s.indexed}, removed ${s.removed}, unchanged ${s.unchanged}`)
+    sp.done()
+    ok(`indexed ${s.indexed}, removed ${s.removed}, unchanged ${s.unchanged}`)
+    const spe = spin('embedding (first run downloads the model)')
     try {
       const n = await embedPending(db, localEmbedder(cfg.embedModel))
-      if (n) console.error(`  embedded ${n} chunks`)
+      spe.done()
+      if (n) ok(`embedded ${n} chunks`)
     } catch (e) {
-      console.error(`  embedding failed (${(e as Error).message}) — keyword-only until the next index run`)
+      spe.done()
+      warn(`embedding failed (${(e as Error).message}) — keyword-only until the next index run`)
     }
     db.close()
   }
 
-  const hasClaude = await run('claude', ['--version']).then(() => true).catch(() => false)
-  if (hasClaude) {
-    if (await yes('register the MCP server in Claude Code? (memory tools in every session)')) {
-      const globalBin = await run('which', ['omem']).then(r => r.stdout.trim()).catch(() => null)
-      const serveCmd = globalBin ? ['omem', 'serve'] : ['npx', '-y', '@kipachu/omem', 'serve']
-      try {
-        await run('claude', ['mcp', 'remove', 'omem', '-s', 'user']).catch(() => null)
-        await run('claude', ['mcp', 'add', 'omem', '-s', 'user', '--', ...serveCmd])
-        console.error(`  registered: ${serveCmd.join(' ')} (user scope — restart sessions to pick it up)`)
-      } catch (e) {
-        console.error(
-          `  registration failed (${(e as Error).message}) — run manually:\n  claude mcp add omem -s user -- ${serveCmd.join(' ')}`,
-        )
-      }
-    }
-  } else {
-    console.error('  (Claude Code not found — register later with: claude mcp add omem -s user -- omem serve)')
-  }
+  const { offerAgents } = await import('./agents.ts')
+  await offerAgents(q => yes(q, false))
 
-  console.error(`\ndone. next:
-  omem watch                    # keep the vault indexed + git-synced in a terminal
-  omem search "what do I know about X"
-  omem stats`)
+  console.error(`\n${bold('done.')} next:
+  ${cyan('omem watch')}                    ${dim('# keep the vault indexed + git-synced in a terminal')}
+  ${cyan('omem search')} "what do I know about X"
+  ${cyan('omem stats')}`)
   rl.close()
 }
