@@ -1,0 +1,51 @@
+{
+  "name": "@kipachu/omem",
+  "version": "0.1.1",
+  "description": "Obsidian-vault-first memory for AI agents: hybrid vector + keyword + graph retrieval over markdown, MCP server, git auto-sync",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kipachu-1/omem.git"
+  },
+  "keywords": [
+    "obsidian",
+    "mcp",
+    "memory",
+    "agents",
+    "rag",
+    "sqlite",
+    "embeddings"
+  ],
+  "bin": {
+    "omem": "bin/omem.mjs"
+  },
+  "files": [
+    "bin",
+    "dist",
+    ".env.example"
+  ],
+  "scripts": {
+    "start": "node src/cli.ts watch",
+    "omem": "node src/cli.ts",
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "prepack": "tsc -p tsconfig.build.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.4.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.2.0",
+    "chokidar": "^4.0.3",
+    "gray-matter": "^4.0.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}
