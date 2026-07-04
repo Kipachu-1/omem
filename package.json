@@ -1,6 +1,6 @@
 {
   "name": "@kipachu/omem",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Obsidian-vault-first memory for AI agents: hybrid vector + keyword + graph retrieval over markdown, MCP server, git auto-sync",
   "type": "module",
   "license": "MIT",
