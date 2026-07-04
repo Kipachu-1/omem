@@ -57,7 +57,11 @@ export const AGENTS: Agent[] = [
   {
     name: 'Claude Code',
     bin: 'claude',
+    dir: home('.claude'),
     register: async cmd => {
+      // `claude` may be off PATH (VS Code launched from the Dock, extension-only install):
+      // fall back to writing the same user-scope config the CLI would
+      if (!(await hasBin('claude'))) return mcpJson(home('.claude.json'))(cmd)
       await run('claude', ['mcp', 'remove', 'omem', '-s', 'user']).catch(() => null)
       await run('claude', ['mcp', 'add', 'omem', '-s', 'user', '--', ...cmd])
       return 'user scope (restart sessions to pick it up)'

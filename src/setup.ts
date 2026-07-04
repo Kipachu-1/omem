@@ -1,7 +1,7 @@
 import { createInterface } from 'node:readline/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { existsSync, cpSync } from 'node:fs'
+import { existsSync, cpSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -9,7 +9,28 @@ import { readConfigFile, writeConfigFile, type OmemConfig } from './config.ts'
 import { bold, dim, cyan, ok, warn, spin } from './ui.ts'
 
 const run = promisify(execFile)
-const expand = (p: string): string => (p === '~' || p.startsWith('~/') ? join(homedir(), p.slice(1)) : p)
+export const expand = (p: string): string => (p === '~' || p.startsWith('~/') ? join(homedir(), p.slice(1)) : p)
+
+/** Starter template + .gitignore + git init + first commit. Shared by `omem init` and the setup wizard. */
+export async function scaffoldVault(vault: string): Promise<void> {
+  cpSync(fileURLToPath(new URL('../template', import.meta.url)), vault, { recursive: true })
+  // written here, not shipped in template/: npm strips .gitignore files from packages
+  writeFileSync(join(vault, '.gitignore'), '# omem\n.omem/\n.DS_Store\n.obsidian/workspace*\n')
+  ok(`created ${vault} from the starter template — rename islands/example-project and islands/user-me to fit`)
+  try {
+    const git = (...args: string[]) => run('git', ['-C', vault, ...args])
+    await git('init', '-q')
+    // same headless-identity fallback as git.ts: a box with no user.email must not wedge the commit
+    const id = (await git('config', 'user.email').then(r => r.stdout.trim()).catch(() => ''))
+      ? []
+      : ['-c', 'user.name=omem', '-c', 'user.email=omem@localhost']
+    await git('add', '-A')
+    await git('-c', 'commit.gpgsign=false', ...id, 'commit', '-q', '--no-verify', '-m', 'vault: init from omem template')
+    ok('git repo initialized, template committed')
+  } catch (e) {
+    warn(`git init failed (${(e as Error).message}) — the vault works without it; git init later to enable sync`)
+  }
+}
 
 export async function runSetup(): Promise<void> {
   // OMEM_SETUP_STDIN=1 lets tests drive the wizard through a pipe
@@ -40,7 +61,11 @@ export async function runSetup(): Promise<void> {
   const nextLine = (): Promise<string> =>
     lines.length ? Promise.resolve(lines.shift()!) : closed ? Promise.resolve('') : new Promise(r => waiters.push(r))
   const ask = async (q: string, def = ''): Promise<string> => {
-    process.stderr.write(`${bold(q)}${def ? dim(` [${def}]`) : ''}: `)
+    const p = `${bold(q)}${def ? dim(` [${def}]`) : ''}: `
+    // prompt via readline so backspace redraws the question instead of its default '> ';
+    // after EOF closed the interface (piped input), prompt() throws — plain write instead
+    if (closed) process.stderr.write(p)
+    else (rl.setPrompt(p), rl.prompt())
     return (await nextLine()).trim() || def
   }
   const askInt = async (q: string, def: number): Promise<number> => {
@@ -60,13 +85,12 @@ export async function runSetup(): Promise<void> {
 
   let vault: string
   for (;;) {
-    const answer = await ask('vault path (your Obsidian folder)', prev.vault ?? '')
+    const answer = await ask('vault path — existing Obsidian folder, or a new path to create one', prev.vault ?? '')
     vault = resolve(expand(answer))
     if (answer && existsSync(vault)) break
     // no vault yet: offer the bundled starter template (islands/inbox/archive + CONVENTIONS.md)
-    if (answer && (await yes(`  ${vault} doesn't exist — create it from the omem starter template?`, false))) {
-      cpSync(fileURLToPath(new URL('../template', import.meta.url)), vault, { recursive: true })
-      ok(`created ${vault} from the template — rename islands/example-project and islands/user-me to fit`)
+    if (answer && (await yes(`  ${vault} doesn't exist — create it from the omem starter template?`))) {
+      await scaffoldVault(vault)
       break
     }
     console.error(`  not found: ${vault}`)

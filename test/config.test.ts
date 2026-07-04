@@ -98,16 +98,28 @@ test('setup wizard end-to-end through a pipe: writes 600 config, config drives c
 
 test('setup scaffolds a new vault from the bundled template when the path does not exist', () => {
   const newVault = join(tmp, 'fresh-vault')
-  // answers: nonexistent path, y (scaffold), poll 30, index? n, agents: EOF -> defaults
+  // answers: nonexistent path, y (scaffold), n (commit-only git sync), poll 30, index? n, agents: EOF -> defaults
   const r = spawnSync(process.execPath, [CLI, 'setup'], {
     encoding: 'utf8',
-    input: `${newVault}\ny\n30\nn\n`,
+    input: `${newVault}\ny\nn\n30\nn\n`,
     env: childEnv({ OMEM_SETUP_STDIN: '1', PATH: '/usr/bin:/bin' }),
   })
   assert.equal(r.status, 0, `setup failed: ${r.stderr}`)
-  for (const f of ['CONVENTIONS.md', 'README.md', 'islands/shared-conventions/README.md', 'inbox/README.md', 'archive/README.md'])
+  for (const f of ['CONVENTIONS.md', 'README.md', 'islands/shared-conventions/README.md', 'inbox/README.md', 'archive/README.md', '.gitignore'])
     assert.ok(existsSync(join(newVault, f)), `template must provide ${f}`)
   assert.equal(JSON.parse(readFileSync(join(cfgHome, 'omem', 'config.json'), 'utf8')).vault, newVault)
+})
+
+test('omem init scaffolds a vault with git history in one command and refuses to clobber', () => {
+  const dest = join(tmp, 'init-vault')
+  const r = spawnSync(process.execPath, [CLI, 'init', dest], { encoding: 'utf8', env: childEnv({ PATH: '/usr/bin:/bin' }) })
+  assert.equal(r.status, 0, `init failed: ${r.stderr}`)
+  assert.ok(existsSync(join(dest, 'CONVENTIONS.md')))
+  assert.ok(existsSync(join(dest, '.gitignore')))
+  const log = execFileSync('git', ['-C', dest, 'log', '--oneline'], { encoding: 'utf8' })
+  assert.match(log, /vault: init from omem template/)
+  const r2 = spawnSync(process.execPath, [CLI, 'init', dest], { encoding: 'utf8', env: childEnv() })
+  assert.equal(r2.status, 1, 'must refuse a non-empty target')
 })
 
 test('setup refuses non-TTY without the test escape hatch', () => {

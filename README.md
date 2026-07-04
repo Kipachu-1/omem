@@ -30,11 +30,11 @@ islands (per-domain folders with per-island conventions), `inbox/` + `memory/` t
 (frontmatter schema, search-before-write, distill-don't-dump).
 
 ```sh
-cp -r "$(npm root -g)/@kipachu/omem/template" ~/my-vault   # global install
-# or from a checkout: cp -r template ~/my-vault
-cd ~/my-vault && git init && git add -A && git commit -m "vault: init from omem template"
-omem setup   # point it at ~/my-vault
+omem init ~/my-vault   # template + .gitignore + git init + first commit
+omem setup             # point it at ~/my-vault
 ```
+
+(`omem setup` also offers this when you give it a path that doesn't exist yet.)
 
 Rename `islands/example-project` and `islands/user-me` to fit; the structure is the
 template, not the names.

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { applyEnvDefaults } from './config.ts'
 import { parseArgs } from 'node:util'
-import { existsSync, rmSync, readFileSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { existsSync, rmSync, readFileSync, statSync, readdirSync } from 'node:fs'
+import { join, relative, resolve, sep } from 'node:path'
 
 // must run before anything reads env-derived values (config file + .env fill the gaps)
 applyEnvDefaults()
@@ -18,6 +18,7 @@ const USAGE = `${bold('omem')} — obsidian vault memory index
 ${dim('usage:')} omem ${cyan('<command>')} [options]
 
 ${cmdLine('setup', 'interactive setup — writes ~/.config/omem/config.json ' + bold('(start here)'))}
+${cmdLine('init', 'create a new vault at <path> from the starter template (git init + first commit)')}
 ${cmdLine('index', 'full sync (incremental via content hashes)')}
 ${cmdLine('watch', 'sync, then watch the vault and index changes live ' + dim('[--poll N: also full-sync every N seconds]'))}
 ${cmdLine('serve', `watch + MCP server on stdio (the normal run mode; --poll defaults to 30)
@@ -323,6 +324,22 @@ async function main(): Promise<void> {
       break
     }
 
+    case 'init': {
+      if (!rest[0]) {
+        fail(`usage: omem init <path>   e.g. omem init ~/my-vault`)
+        process.exit(1)
+      }
+      const { scaffoldVault, expand } = await import('./setup.ts')
+      const dest = resolve(expand(rest[0]))
+      if (existsSync(dest) && (statSync(dest).isFile() || readdirSync(dest).length)) {
+        fail(`${dest} already exists and is not empty — init only creates new vaults`)
+        process.exit(1)
+      }
+      await scaffoldVault(dest)
+      console.error(`\nnext: ${cyan('omem setup')} ${dim(`— point it at ${dest} to configure indexing + git sync`)}`)
+      break
+    }
+
     case 'sync': {
       const vault = vaultPath()
       const { createGitSync } = await import('./git.ts')
@@ -368,7 +385,9 @@ async function main(): Promise<void> {
       // EOF while questions remain answers "no" to the rest instead of crashing readline
       await offerAgents(async q => {
         if (!open) return false
-        process.stderr.write(`${q} ${dim('[y/N]')} `)
+        // setPrompt so readline redraws the question on backspace instead of its default '> '
+        rl.setPrompt(`${q} ${dim('[y/N]')} `)
+        rl.prompt()
         const line = await new Promise<string>(res => {
           rl.once('line', res)
           rl.once('close', () => res(''))
