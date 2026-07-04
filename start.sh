@@ -20,4 +20,8 @@ if [ ! -d /vault/.git ]; then
   git -C /vault remote set-url origin "https://github.com/${VAULT_REPO}.git"
 fi
 
+# headless box has no global git identity; rebase/commit need one (repo-local, idempotent)
+git -C /vault config user.name omem
+git -C /vault config user.email omem@localhost
+
 exec omem serve --port "${PORT:-8080}"

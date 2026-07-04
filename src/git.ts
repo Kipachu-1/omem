@@ -77,12 +77,17 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
 
   const head = async (): Promise<string> => (await tryGit(['rev-parse', '-q', '--verify', 'HEAD']))?.stdout.trim() ?? ''
 
+  // commit AND pull --rebase both create commits; a headless box with no git
+  // identity must not wedge either (rebase dies with "Committer identity unknown")
+  const identity = async (): Promise<string[]> =>
+    (await tryGit(['config', 'user.email']))?.stdout.trim() ? [] : ['-c', 'user.name=omem', '-c', 'user.email=omem@localhost']
+
   /** 'ok' = clean (possibly no-op) pull; 'conflict' = aborted, warned; 'fail' = network/other, warned */
   async function pullRebase(): Promise<'ok' | 'conflict' | 'fail'> {
     const before = await head()
     try {
       // -X theirs in a rebase keeps the LOCAL commit's hunks; the remote version stays in ancestry
-      await git([...cred, 'pull', '--rebase=true', '-X', 'theirs', '--no-autostash', '-q'], NET_MS)
+      await git([...cred, ...(await identity()), 'pull', '--rebase=true', '-X', 'theirs', '--no-autostash', '-q'], NET_MS)
       if ((await head()) !== before && onPulled) await onPulled()
       return 'ok'
     } catch (e) {
@@ -149,11 +154,8 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
     await git(['add', '-A', '--', '.'])
     if ((await tryGit(['diff', '--cached', '--quiet', '--', '.'])) === null) {
       const names = (await git(['diff', '--cached', '--name-only', '--', '.'])).stdout.trim().split('\n').filter(Boolean)
-      const identity = (await tryGit(['config', 'user.email']))?.stdout.trim()
-        ? []
-        : ['-c', 'user.name=omem', '-c', 'user.email=omem@localhost']
       const body = names.slice(0, 3).join('\n') + (names.length > 3 ? `\n… ${names.length - 3} more` : '')
-      await git(['-c', 'commit.gpgsign=false', ...identity, 'commit', '-q', '--no-verify', '-m', `omem: sync ${names.length} note(s)`, '-m', body])
+      await git(['-c', 'commit.gpgsign=false', ...(await identity()), 'commit', '-q', '--no-verify', '-m', `omem: sync ${names.length} note(s)`, '-m', body])
       res.committed = names.length
       console.error(`omem git: committed ${names.length} file(s)`)
     }
