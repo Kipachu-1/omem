@@ -20,7 +20,8 @@ ${dim('usage:')} omem ${cyan('<command>')} [options]
 ${cmdLine('setup', 'interactive setup — writes ~/.config/omem/config.json ' + bold('(start here)'))}
 ${cmdLine('index', 'full sync (incremental via content hashes)')}
 ${cmdLine('watch', 'sync, then watch the vault and index changes live ' + dim('[--poll N: also full-sync every N seconds]'))}
-${cmdLine('serve', 'watch + MCP server on stdio (the normal run mode; --poll defaults to 30)')}
+${cmdLine('serve', `watch + MCP server on stdio (the normal run mode; --poll defaults to 30)
+           ${dim('--port N serves MCP over HTTP instead; set OMEM_HTTP_TOKEN to require bearer auth')}`)}
 ${cmdLine('search', `query the index:  omem search "how does X work" ${dim('[--json] [--limit N] [--folder F] [--tag T] [--keyword-only]')}`)}
 ${cmdLine('sync', 'git commit + pull + push the vault once (cron-friendly)')}
 ${cmdLine('rebuild', 'drop the index and re-sync from scratch')}
@@ -45,6 +46,7 @@ const { values, positionals } = parseArgs({
     tag: { type: 'string', multiple: true },
     'keyword-only': { type: 'boolean' },
     poll: { type: 'string' },
+    port: { type: 'string' },
     git: { type: 'boolean' },
     'git-pull-interval': { type: 'string' },
   },
@@ -301,8 +303,17 @@ async function main(): Promise<void> {
       const s = fullIndex(db, vault)
       ok(`initial sync: indexed ${s.indexed}, removed ${s.removed}, unchanged ${s.unchanged}`)
       await startWatcher(db, vault, parsePoll(30), gitPullSec())
-      const { serveMcp } = await import('./mcp.ts')
-      await serveMcp(db, vault, embedder)
+      const { serveMcp, serveHttp } = await import('./mcp.ts')
+      if (values.port !== undefined) {
+        const port = Number(values.port)
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          fail(`--port must be 1-65535, got "${values.port}"`)
+          process.exit(1)
+        }
+        await serveHttp(db, vault, embedder, port)
+      } else {
+        await serveMcp(db, vault, embedder)
+      }
       break
     }
 

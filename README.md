@@ -50,6 +50,27 @@ Search flags: `--json`, `--limit N`, `--folder projects`, `--tag project/canvas`
 Writes are plain markdown — no delete tool; deleting is a human action in Obsidian.
 The serve process also watches the vault (`--poll` defaults to 30s full-sync sweeps).
 
+`omem serve --port 8080` serves MCP over streamable HTTP instead of stdio (plus `GET /healthz`).
+Auth is optional: set `OMEM_HTTP_TOKEN` and clients must send `Authorization: Bearer <token>` —
+without it the endpoint is open, so never expose an unauthenticated port publicly.
+
+## Deploy (Railway / Docker)
+
+The repo ships a `Dockerfile` + `start.sh` that run a 24/7 memory server: the vault is cloned
+from GitHub at boot, served over HTTP, and git-synced both ways (agent writes get committed and
+pushed; edits from your other devices get pulled).
+
+1. Create a Railway service from this repo (it picks up the Dockerfile).
+2. Mount a volume at `/vault` — persists the clone, index, and embedding model across deploys.
+3. Set env vars: `VAULT_REPO` (e.g. `youruser/your-vault`), `GITHUB_TOKEN` (fine-grained PAT,
+   read/write contents on that repo only), `OMEM_HTTP_TOKEN` (`openssl rand -hex 32`).
+4. Generate a public domain, then on each client:
+
+```sh
+claude mcp add --transport http omem https://<app>.up.railway.app/mcp \
+  --header "Authorization: Bearer <your OMEM_HTTP_TOKEN>"
+```
+
 ## Git sync
 
 `--git` (or `OMEM_GIT=1`) on `watch`/`serve` keeps a GitHub-hosted vault in sync:
