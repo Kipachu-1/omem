@@ -21,7 +21,7 @@
 FROM node:22-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-RUN npm i -g @kipachu/omem@0.3.0
+RUN npm i -g @kipachu/omem@0.4.0
 ENV OMEM_VAULT=/vault OMEM_GIT=1
 COPY start.sh /start.sh
 CMD ["sh", "/start.sh"]
