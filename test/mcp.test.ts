@@ -44,12 +44,45 @@ after(async () => {
   rmSync(vault, { recursive: true, force: true })
 })
 
-test('exposes exactly the four memory tools', async () => {
+test('exposes exactly the eight memory tools', async () => {
   const { tools } = await client.listTools()
   assert.deepEqual(
     tools.map(t => t.name).sort(),
-    ['memory_get_note', 'memory_recent', 'memory_search', 'memory_write'],
+    ['memory_archive', 'memory_get_note', 'memory_list', 'memory_move', 'memory_recent', 'memory_search', 'memory_sync', 'memory_write'],
   )
+})
+
+test('memory_list enumerates by folder and tag, memory_move relocates, memory_archive supersedes', async () => {
+  await call('memory_write', { title: 'List Target', content: 'listable body', folder: 'inbox', tags: ['triage/pending'] })
+
+  // list by folder
+  const inbox = await call('memory_list', { folder: 'inbox' })
+  const entry = inbox.find((n: { title: string }) => n.title === 'List Target')
+  assert.ok(entry, 'note must be listed under its folder')
+  // list by tag (nested prefix match)
+  const tagged = await call('memory_list', { tag: 'triage' })
+  assert.ok(tagged.some((n: { path: string }) => n.path === entry.path), 'tag prefix must match')
+
+  // move: inbox triage into a folder
+  const moved = await call('memory_move', { from: entry.path, to: 'projects/list-target.md' })
+  assert.equal(moved.to, 'projects/list-target.md')
+  assert.ok(!existsSync(join(vault, entry.path)) && existsSync(join(vault, moved.to)))
+  assert.equal((await call('memory_list', { folder: 'inbox' })).length, 0, 'old index entry must be gone')
+
+  // archive: pinned:false + archived_at, original removed, still searchable at archive/
+  const arch = await call('memory_archive', { path: moved.to, reason: 'superseded in test' })
+  assert.equal(arch.to, 'archive/projects/list-target.md')
+  assert.ok(!existsSync(join(vault, moved.to)))
+  const raw = readFileSync(join(vault, arch.to), 'utf8')
+  assert.match(raw, /pinned: false/)
+  assert.match(raw, /archived_reason: superseded in test/)
+  const listed = await call('memory_list', { folder: 'archive' })
+  assert.ok(listed.some((n: { path: string }) => n.path === arch.to), 'archived note must stay indexed')
+})
+
+test('memory_sync reports skip on a non-repo vault instead of erroring', async () => {
+  const r = await call('memory_sync', {})
+  assert.equal(r.skipped, 'not a repo')
 })
 
 test('memory_search returns ranked chunks with deep links', async () => {

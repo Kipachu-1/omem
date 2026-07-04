@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, realpathSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, realpathSync, renameSync, unlinkSync } from 'node:fs'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
@@ -6,7 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import matter from 'gray-matter'
 import type { DB } from './db.ts'
-import { indexFile, embedPending, SKIP_DIRS } from './indexer.ts'
+import { indexFile, deleteNote, embedPending, SKIP_DIRS } from './indexer.ts'
 import { search } from './search.ts'
 import type { Embedder } from './embed.ts'
 
@@ -203,6 +203,121 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
         .prepare(`SELECT path, title, mtime FROM notes ${where} ORDER BY mtime DESC LIMIT ?`)
         .all(...params, a.limit ?? 10) as { path: string; title: string; mtime: number }[]
       return json(rows.map(r => ({ ...r, modified: new Date(r.mtime).toISOString(), link: deepLink(r.path) })))
+    },
+  )
+
+  // folder LIKE-pattern with %/_/\ escaped, shared by list/recent-style filters
+  const folderPat = (f: string) => f.replace(/\/+$/, '').replace(/[\\%_]/g, m => '\\' + m) + '/%'
+
+  server.registerTool(
+    'memory_list',
+    {
+      title: 'List notes',
+      description:
+        'Enumerate vault notes by folder and/or tag — browse an island without needing a search query. Sorted by path.',
+      inputSchema: {
+        folder: z.string().optional().describe("folder prefix, e.g. 'islands/y-agents'"),
+        tag: z.string().optional().describe('require this tag (nested tags match by prefix)'),
+        limit: z.number().int().min(1).max(500).optional().describe('default 100'),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async a => {
+      const where: string[] = []
+      const params: unknown[] = []
+      if (a.folder) where.push("path LIKE ? ESCAPE '\\'"), params.push(folderPat(a.folder))
+      if (a.tag) {
+        where.push(
+          "EXISTS (SELECT 1 FROM edges e WHERE e.src_path = notes.path AND e.type = 'tag' AND (e.dst = ? OR e.dst LIKE ? ESCAPE '\\'))",
+        )
+        params.push(a.tag, a.tag.replace(/[\\%_]/g, m => '\\' + m) + '/%')
+      }
+      const rows = db
+        .prepare(
+          `SELECT path, title, mtime FROM notes ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY path LIMIT ?`,
+        )
+        .all(...params, a.limit ?? 100) as { path: string; title: string; mtime: number }[]
+      return json(rows.map(r => ({ path: r.path, title: r.title, modified: new Date(r.mtime).toISOString() })))
+    },
+  )
+
+  server.registerTool(
+    'memory_move',
+    {
+      title: 'Move / rename a note',
+      description:
+        'Move a note to a new vault-relative path — e.g. triage an inbox/ note into its island folder. ' +
+        'Does NOT rewrite [[wikilinks]] pointing at the old name, so prefer moves that keep the filename.',
+      inputSchema: {
+        from: z.string().describe('current vault-relative path'),
+        to: z.string().describe('new vault-relative path (folders are created as needed)'),
+      },
+    },
+    async a => {
+      const src = safeRel(a.from.endsWith('.md') ? a.from : a.from + '.md')
+      if (!existsSync(src.abs)) throw new Error(`note not found: ${src.rel}`)
+      let dst = safeRel(a.to.endsWith('.md') ? a.to : a.to + '.md')
+      assertIndexable(dst.rel)
+      if (existsSync(dst.abs)) throw new Error(`target already exists: ${dst.rel}`)
+      mkdirSync(dirname(dst.abs), { recursive: true })
+      dst = safeRel(dst.rel) // parent exists now: pick up its canonical casing
+      renameSync(src.abs, dst.abs)
+      deleteNote(db, src.rel)
+      await indexNow(dst.rel)
+      return json({ from: src.rel, to: dst.rel, link: deepLink(dst.rel) })
+    },
+  )
+
+  server.registerTool(
+    'memory_archive',
+    {
+      title: 'Archive a note',
+      description:
+        'Supersede a note: sets pinned:false, stamps archived_at, and moves it to archive/<original path>. ' +
+        'This is the vault convention replacement for deletion — nothing is ever hard-deleted over MCP.',
+      inputSchema: {
+        path: z.string().describe('vault-relative path of the note to archive'),
+        reason: z.string().optional().describe('why it was superseded; recorded as archived_reason'),
+      },
+    },
+    async a => {
+      const src = safeRel(a.path.endsWith('.md') ? a.path : a.path + '.md')
+      if (!existsSync(src.abs)) throw new Error(`note not found: ${src.rel}`)
+      if (src.rel.startsWith('archive/')) throw new Error(`already archived: ${src.rel}`)
+      const raw = readFileSync(src.abs, 'utf8')
+      let fm: Record<string, unknown> = {}
+      let content = raw
+      try {
+        const parsed = matter(raw)
+        if (parsed.data && typeof parsed.data === 'object') (fm = parsed.data as Record<string, unknown>), (content = parsed.content)
+      } catch {
+        // malformed frontmatter: archive the raw body under fresh frontmatter
+      }
+      fm = { ...fm, pinned: false, archived_at: new Date().toISOString(), ...(a.reason ? { archived_reason: a.reason } : {}) }
+      let dst = safeRel(`archive/${src.rel}`)
+      if (existsSync(dst.abs)) throw new Error(`archive target already exists: ${dst.rel}`)
+      mkdirSync(dirname(dst.abs), { recursive: true })
+      dst = safeRel(dst.rel)
+      writeFileSync(dst.abs, matter.stringify(content, fm))
+      unlinkSync(src.abs)
+      deleteNote(db, src.rel)
+      await indexNow(dst.rel)
+      return json({ archived: src.rel, to: dst.rel, link: deepLink(dst.rel) })
+    },
+  )
+
+  server.registerTool(
+    'memory_sync',
+    {
+      title: 'Git-sync the vault now',
+      description:
+        'Force an immediate git commit + pull + push of the vault (same as `omem sync`). ' +
+        'Use after important writes when the periodic sync is too slow; harmless if nothing changed.',
+      inputSchema: {},
+    },
+    async () => {
+      const { createGitSync } = await import('./git.ts')
+      return json(await createGitSync(vault)({ pull: true }))
     },
   )
 

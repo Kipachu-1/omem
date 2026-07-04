@@ -38,7 +38,7 @@ Search flags: `--json`, `--limit N`, `--folder projects`, `--tag project/canvas`
 
 ## MCP server
 
-`omem serve` exposes four tools over stdio (register with your MCP client, e.g.
+`omem serve` exposes eight tools over stdio (register with your MCP client, e.g.
 `claude mcp add omem -- node <repo>/src/cli.ts serve --vault <vault>`):
 
 - `memory_search` — hybrid search; ranked chunks + `obsidian://` links. Filters: folder, tags, expandGraph.
@@ -46,8 +46,12 @@ Search flags: `--json`, `--limit N`, `--folder projects`, `--tag project/canvas`
 - `memory_write` — create `memory/YYYY-MM-DD-slug.md` (or `folder`), or update via `path` + `mode: overwrite|append`.
   `tags`/`links`/arbitrary `frontmatter` supported; the note is indexed and embedded before the call returns.
 - `memory_recent` — recently modified notes.
+- `memory_list` — enumerate notes by folder and/or tag, no query needed.
+- `memory_move` — relocate/rename a note (inbox triage); wikilinks are not rewritten.
+- `memory_archive` — supersede a note: `pinned: false`, `archived_at`, moved to `archive/<path>`.
+- `memory_sync` — force an immediate git commit + pull + push (same as `omem sync`).
 
-Writes are plain markdown — no delete tool; deleting is a human action in Obsidian.
+Writes are plain markdown — no hard-delete tool; archiving preserves the note, deleting is a human action in Obsidian.
 The serve process also watches the vault (`--poll` defaults to 30s full-sync sweeps).
 
 `omem serve --port 8080` serves MCP over streamable HTTP instead of stdio (plus `GET /healthz`).
