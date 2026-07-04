@@ -22,6 +22,23 @@ omem update                # self-update to the latest npm release
 Config lives at `~/.config/omem/config.json` (chmod 600; may hold an optional GitHub PAT).
 Precedence: flags > env > repo `.env` (dev) > config file.
 
+## Start a vault from the template
+
+No vault yet? The [`template/`](./template) folder is a ready-to-use starting structure —
+islands (per-domain folders with per-island conventions), `inbox/` + `memory/` triage flow,
+`archive/` instead of deletion, and a `CONVENTIONS.md` that teaches agents the write rules
+(frontmatter schema, search-before-write, distill-don't-dump).
+
+```sh
+cp -r "$(npm root -g)/@kipachu/omem/template" ~/my-vault   # global install
+# or from a checkout: cp -r template ~/my-vault
+cd ~/my-vault && git init && git add -A && git commit -m "vault: init from omem template"
+omem setup   # point it at ~/my-vault
+```
+
+Rename `islands/example-project` and `islands/user-me` to fit; the structure is the
+template, not the names.
+
 ## Use (repo checkout)
 
 ```sh

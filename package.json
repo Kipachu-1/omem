@@ -23,6 +23,7 @@
   "files": [
     "bin",
     "dist",
+    "template",
     ".env.example"
   ],
   "scripts": {

@@ -1,9 +1,10 @@
 import { createInterface } from 'node:readline/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { existsSync } from 'node:fs'
+import { existsSync, cpSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { readConfigFile, writeConfigFile, type OmemConfig } from './config.ts'
 import { bold, dim, cyan, ok, warn, spin } from './ui.ts'
 
@@ -62,6 +63,12 @@ export async function runSetup(): Promise<void> {
     const answer = await ask('vault path (your Obsidian folder)', prev.vault ?? '')
     vault = resolve(expand(answer))
     if (answer && existsSync(vault)) break
+    // no vault yet: offer the bundled starter template (islands/inbox/archive + CONVENTIONS.md)
+    if (answer && (await yes(`  ${vault} doesn't exist — create it from the omem starter template?`, false))) {
+      cpSync(fileURLToPath(new URL('../template', import.meta.url)), vault, { recursive: true })
+      ok(`created ${vault} from the template — rename islands/example-project and islands/user-me to fit`)
+      break
+    }
     console.error(`  not found: ${vault}`)
     if (closed) {
       console.error('no valid vault provided — aborting')
