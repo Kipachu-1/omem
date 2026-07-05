@@ -170,3 +170,41 @@ test('multi-segment link target heals via path suffix, converges', () => {
   assert.deepEqual(healed, { dst: 'archive/old-thing.md', resolved: 1 })
   assertConverged(db, vault)
 })
+
+test('1k-note vault: fullIndex converges (incremental == rebuild) and exercises reResolve at scale', () => {
+  const big = mkdtempSync(join(tmpdir(), 'omem-big-'))
+  try {
+    // 1000 notes across 10 folders, each linking to a few others by basename and
+    // title — every one triggers a reResolve pass, the O(n²) hot path this fixes.
+    for (let f = 0; f < 10; f++) {
+      mkdirSync(join(big, `folder${f}`), { recursive: true })
+      for (let n = 0; n < 100; n++) {
+        const targetA = `folder${(f + 1) % 10}/note${(n + 1) % 100}`
+        const targetB = `folder${(f + 2) % 10}/note${(n + 7) % 100}`
+        writeFileSync(
+          join(big, `folder${f}`, `note${n}.md`),
+          `---\ntitle: Note ${f}-${n}\n---\nlinks: [[${targetA}]] [[${targetB}]] [[Note ${f}-${n}]]\n`,
+        )
+      }
+    }
+    const t0 = Date.now()
+    fullIndex(db, big)
+    const elapsed = Date.now() - t0
+    // a note also links to its own title ([[Note f-n]]) — proves the title-match
+    // branch of the candidate query is exercised at scale.
+    assert.equal(count('SELECT count(*) n FROM notes'), 1000)
+
+    const fresh = openDb(':memory:')
+    fullIndex(fresh, big)
+    const dump = (d: DB) => ({
+      notes: d.prepare('SELECT path, title, hash FROM notes ORDER BY path').all(),
+      edges: d.prepare('SELECT src_path, dst, type, resolved, raw FROM edges ORDER BY src_path, dst, type, raw').all(),
+    })
+    assert.deepEqual(dump(db), dump(fresh), 'incremental == rebuild invariant holds at 1k notes')
+    fresh.close()
+    // soft timing log for manual perf inspection (no hard assertion — flaky in CI)
+    console.log(`  1k-note fullIndex + reResolve: ${elapsed}ms`)
+  } finally {
+    rmSync(big, { recursive: true, force: true })
+  }
+})

@@ -47,6 +47,11 @@ export function openDb(dbPath: string): DB {
       PRIMARY KEY (src_path, raw, type)
     );
     CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst);
+    -- partial indexes for reResolve / deleteNote: only wikilink edges are scanned there.
+    -- expression index on lower(raw): reResolve matches after lowercasing, so a plain
+    -- raw = ? would miss case variants; lower(raw) IN (...) is both correct and indexable.
+    CREATE INDEX IF NOT EXISTS edges_wikilink_lraw ON edges(lower(raw)) WHERE type = 'wikilink';
+    CREATE INDEX IF NOT EXISTS edges_wikilink_dst ON edges(dst) WHERE type = 'wikilink';
   `)
   return db
 }
