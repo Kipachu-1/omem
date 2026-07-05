@@ -206,3 +206,20 @@ test('serve exits when the client closes stdin', async () => {
   const code = await Promise.race([exited, new Promise<string>(r => setTimeout(() => r('timeout'), 5000))])
   assert.notEqual(code, 'timeout', 'serve must exit on stdin EOF, not orphan itself')
 })
+
+test('memory_search after/before recency filters work over MCP', async () => {
+  // future cutoff excludes all notes
+  const r = await call('memory_search', { query: 'canvas', after: Date.now() + 86_400_000 })
+  assert.equal(r.length, 0, 'future after-cutoff must exclude all notes')
+  // epoch-0 cutoff (1970) keeps everything
+  const r2 = await call('memory_search', { query: 'canvas', after: 0 })
+  assert.ok(r2.length > 0, 'epoch-0 after-cutoff must keep notes')
+})
+
+test('memory_search rejects non-numeric after (zod guard)', async () => {
+  const res = (await client.callTool({
+    name: 'memory_search',
+    arguments: { query: 'canvas', after: 'yesterday' },
+  })) as { isError?: boolean }
+  assert.ok(res.isError, 'string after must be rejected by the schema')
+})

@@ -128,3 +128,28 @@ test('filters with zero matching notes return empty fast', async () => {
   const r = await search(db, 'canvas', { embedder: fake, folder: 'nonexistent' })
   assert.deepEqual(r, [])
 })
+
+test('after filter excludes notes older than the threshold', async () => {
+  // 60-day-old memory note is excluded by a 1-day-ago cutoff; fresh memory note stays
+  const r = await search(db, 'indentation', { embedder: null, after: Date.now() - 86_400_000 })
+  assert.ok(!r.some(x => x.notePath === 'memory/2026-06-28-prefers-spaces.md'), 'stale note excluded by after')
+  assert.ok(r.some(x => x.notePath === 'memory/2026-07-01-prefers-tabs.md'), 'fresh note kept by after')
+})
+
+test('before filter excludes notes newer than the threshold', async () => {
+  // a cutoff 30 days ago excludes the fresh note but keeps the 60-day-old one
+  const r = await search(db, 'indentation', { embedder: null, before: Date.now() - 30 * 86_400_000 })
+  assert.ok(!r.some(x => x.notePath === 'memory/2026-07-01-prefers-tabs.md'), 'fresh note excluded by before')
+  assert.ok(r.some(x => x.notePath === 'memory/2026-06-28-prefers-spaces.md'), 'stale note kept by before')
+})
+
+test('after + before window returns only notes inside the window', async () => {
+  // window [now-70d, now-50d] contains the 60-day-old note but not the fresh one
+  const r = await search(db, 'indentation', {
+    embedder: null,
+    after: Date.now() - 70 * 86_400_000,
+    before: Date.now() - 50 * 86_400_000,
+  })
+  assert.ok(r.some(x => x.notePath === 'memory/2026-06-28-prefers-spaces.md'), '60d-old note inside window')
+  assert.ok(!r.some(x => x.notePath === 'memory/2026-07-01-prefers-tabs.md'), 'fresh note outside window')
+})
