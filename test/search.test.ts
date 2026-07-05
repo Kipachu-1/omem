@@ -206,3 +206,37 @@ test('recall pinnedOnly returns only pinned notes', async () => {
   for (const x of all)
     assert.equal(x.notePath, 'memory/decision-recall-decision-pinned.md', `only pinned note expected, got ${x.notePath}`)
 })
+
+// --- topSimilar: pre-write dedup primitive (OME-10) ---
+
+test('topSimilar: near-duplicate text surfaces the existing note with high score', async () => {
+  const { topSimilar } = await import('../src/search.ts')
+  // paraphrase the canvas renderer note — shares most words with projects/canvas.md
+  const hits = await topSimilar(db, fake, 'canvas rendering performance degrades layers batching draw calls frame drops', 5)
+  assert.ok(hits.length > 0)
+  const top = hits[0]
+  assert.equal(top.note_path, 'projects/canvas.md')
+  assert.ok(top.score > 0.78, `expected score > 0.78, got ${top.score}`)
+  assert.equal(top.title, 'Canvas Renderer')
+})
+
+test('topSimilar: returns empty on a vault with no embeddings', async () => {
+  const { topSimilar } = await import('../src/search.ts')
+  const emptyDb = openDb(':memory:')
+  // no fullIndex/embedPending — no chunks with embeddings
+  const hits = await topSimilar(emptyDb, fake, 'some text about canvas rendering', 5)
+  assert.deepEqual(hits, [])
+  emptyDb.close()
+})
+
+test('topSimilar: skips when embed model mismatches the recorded meta', async () => {
+  const { topSimilar } = await import('../src/search.ts')
+  const { setMeta } = await import('../src/db.ts')
+  setMeta(db, 'embed_model', 'some-other-model')
+  try {
+    const hits = await topSimilar(db, fake, 'canvas rendering performance', 5)
+    assert.deepEqual(hits, [], 'model mismatch must short-circuit to empty')
+  } finally {
+    setMeta(db, 'embed_model', 'fake-bow')
+  }
+})
