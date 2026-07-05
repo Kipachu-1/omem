@@ -16,14 +16,13 @@ const DEDUP_THRESHOLD = 0.78
 
 /**
  * Server-level instructions injected into the agent's system prompt by MCP clients.
- * Accurate to the current 9-tool surface — sibling issues (OME-10/14) append
- * lines for `supersedes` and `kind` as those features land.
+ * Accurate to the current 11-tool surface — sibling issues append lines here as new tools land.
  * Keep under ~400 chars; some clients silently trim long instructions.
  */
 const INSTRUCTIONS =
   'Shared Obsidian memory vault via omem. memory_recall before acting (groups by kind, pinned first); ' +
-  'memory_search FIRST for prior context (decisions, conventions, people, gotchas). Search before ' +
-  'memory_write to avoid duplicates. memory_get_note for full notes, memory_recent (since:lastSeen) ' +
+  'memory_search FIRST for prior context. Search before memory_write to avoid duplicates. ' +
+  'memory_get_note for full notes, memory_graph for a note\'s neighborhood, memory_recent (since:lastSeen) ' +
   'for what changed, memory_list to browse, memory_status for a snapshot. Prefer append mode.'
 
 /**
@@ -260,6 +259,163 @@ export function buildServer(
           .all(rel) as { src_path: string }[]
       ).map(r => r.src_path)
       return json({ path: rel, frontmatter, content, backlinks, link: deepLink(rel) })
+    },
+  )
+
+  server.registerTool(
+    'memory_graph',
+    {
+      title: 'Browse the note neighborhood',
+      description:
+        "Return a note's local graph: outgoing wikilinks, incoming backlinks, tag neighbors, " +
+        'and embedding-similar notes. One call replaces N get_note round-trips when assembling ' +
+        'a topic. Use when you already have a note path and want its neighborhood, NOT when you ' +
+        'have a query (use memory_search or memory_recall for that).',
+      inputSchema: {
+        path: z.string().describe('vault-relative path of the seed note'),
+        outgoing: z.boolean().optional().describe('include outgoing wikilinks, default true'),
+        incoming: z.boolean().optional().describe('include incoming backlinks, default true'),
+        byTag: z.boolean().optional().describe('include notes sharing any tag, default false'),
+        byEmbedding: z.boolean().optional().describe('include top-k embedding-similar notes, default false'),
+        k: z.number().int().min(1).max(3).optional().describe('hops for outgoing/incoming, default 1'),
+        limit: z.number().int().min(1).max(100).optional().describe('cap on total neighbors, default 30'),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async a => {
+      const { rel } = safeRel(a.path)
+      const seedRow = db.prepare('SELECT path, title, kind, pinned FROM notes WHERE path = ?').get(rel) as
+        | { path: string; title: string; kind: string | null; pinned: number }
+        | undefined
+      if (!seedRow) throw new Error(`note not found: ${rel}`)
+      const seed = { path: seedRow.path, title: seedRow.title, kind: seedRow.kind, pinned: seedRow.pinned }
+      const k = a.k ?? 1
+      const limit = a.limit ?? 30
+      const wantOut = a.outgoing !== false
+      const wantIn = a.incoming !== false
+      const wantTag = a.byTag === true
+      const wantEmb = a.byEmbedding === true
+
+      // per-direction visited sets keep k-hop traversal independent; a final cross-list
+      // dedup (outgoing > incoming > byTag > byEmbedding) handles the "listed once" rule.
+      const outgoing: { path: string; hop: number }[] = []
+      const incoming: { path: string; hop: number }[] = []
+      const byTag: { path: string; title: string; sharedTags: string[] }[] = []
+      let byEmbedding: { path: string; title: string; score: number }[] = []
+
+      if (wantOut) {
+        const seen = new Set<string>([seed.path])
+        let frontier = [seed.path]
+        for (let hop = 1; hop <= k; hop++) {
+          if (!frontier.length) break
+          const ph = frontier.map(() => '?').join(',')
+          const rows = db
+            .prepare(
+              `SELECT DISTINCT e.dst AS path FROM edges e JOIN notes n ON n.path = e.dst
+               WHERE e.src_path IN (${ph}) AND e.type = 'wikilink' AND e.resolved = 1`,
+            )
+            .all(...frontier) as { path: string }[]
+          const next: string[] = []
+          for (const r of rows) {
+            if (seen.has(r.path)) continue
+            seen.add(r.path)
+            outgoing.push({ path: r.path, hop })
+            next.push(r.path)
+          }
+          frontier = next
+        }
+      }
+
+      if (wantIn) {
+        const seen = new Set<string>([seed.path])
+        let frontier = [seed.path]
+        for (let hop = 1; hop <= k; hop++) {
+          if (!frontier.length) break
+          const ph = frontier.map(() => '?').join(',')
+          const rows = db
+            .prepare(
+              `SELECT DISTINCT e.src_path AS path FROM edges e JOIN notes n ON n.path = e.src_path
+               WHERE e.dst IN (${ph}) AND e.type = 'wikilink' AND e.resolved = 1`,
+            )
+            .all(...frontier) as { path: string }[]
+          const next: string[] = []
+          for (const r of rows) {
+            if (seen.has(r.path)) continue
+            seen.add(r.path)
+            incoming.push({ path: r.path, hop })
+            next.push(r.path)
+          }
+          frontier = next
+        }
+      }
+
+      if (wantTag) {
+        const rows = db
+          .prepare(
+            `SELECT n.path AS path, n.title AS title, GROUP_CONCAT(e.dst) AS sharedTags
+             FROM edges e JOIN notes n ON n.path = e.src_path
+             WHERE e.type = 'tag'
+               AND e.dst IN (SELECT dst FROM edges WHERE src_path = ? AND type = 'tag')
+               AND n.path != ?
+             GROUP BY n.path
+             ORDER BY n.path`,
+          )
+          .all(seed.path, seed.path) as { path: string; title: string; sharedTags: string }[]
+        byTag.push(...rows.map(r => ({ path: r.path, title: r.title, sharedTags: r.sharedTags.split(',') })))
+      }
+
+      if (wantEmb) {
+        const ch = db.prepare('SELECT text FROM chunks WHERE note_path = ? ORDER BY position LIMIT 1').get(seed.path) as
+          | { text: string }
+          | undefined
+        const seedText = ch?.text ?? seed.title
+        // reuse the dedup-on-write cosine helper (topSimilar, OME-10) — same note-level
+        // best-score shape; not a shared `search()` helper because search() ranks chunks (RRF)
+        const sim = (await topSimilar(db, embedder, seedText, limit)).filter(r => r.note_path !== seed.path)
+        byEmbedding = sim.map(r => ({ path: r.note_path, title: r.title, score: r.score }))
+      }
+
+      // cross-list dedup: outgoing first, then incoming, byTag, byEmbedding
+      const claimed = new Set<string>([seed.path])
+      const dedup = <T extends { path: string }>(arr: T[]): T[] => arr.filter(e => !claimed.has(e.path) && (claimed.add(e.path), true))
+      const outFinal = dedup(outgoing)
+      const inFinal = dedup(incoming)
+      const tagFinal = dedup(byTag)
+      const embFinal = dedup(byEmbedding)
+
+      // batch-fetch titles for outgoing/incoming (byTag/byEmbedding already carry them)
+      const needTitles = [...outFinal, ...inFinal].map(e => e.path)
+      const titleMap = new Map<string, string>()
+      if (needTitles.length) {
+        const ph = needTitles.map(() => '?').join(',')
+        const rows = db.prepare(`SELECT path, title FROM notes WHERE path IN (${ph})`).all(...needTitles) as {
+          path: string
+          title: string
+        }[]
+        for (const r of rows) titleMap.set(r.path, r.title)
+      }
+
+      // `limit` caps the total union: trim lowest-priority lists first (byEmbedding, byTag, incoming, outgoing)
+      let total = outFinal.length + inFinal.length + tagFinal.length + embFinal.length
+      const trim = (arr: unknown[]): void => {
+        while (total > limit && arr.length) {
+          arr.pop()
+          total--
+        }
+      }
+      trim(embFinal)
+      trim(tagFinal)
+      trim(inFinal)
+      trim(outFinal)
+
+      return json({
+        seed,
+        outgoing: outFinal.map(e => ({ path: e.path, title: titleMap.get(e.path) ?? e.path, hop: e.hop, score: 1.0 })),
+        incoming: inFinal.map(e => ({ path: e.path, title: titleMap.get(e.path) ?? e.path, hop: e.hop, score: 1.0 })),
+        byTag: tagFinal.map(e => ({ path: e.path, title: e.title, sharedTags: e.sharedTags, link: deepLink(e.path) })),
+        byEmbedding: embFinal.map(e => ({ path: e.path, title: e.title, score: e.score, link: deepLink(e.path) })),
+        totalNodes: total,
+      })
     },
   )
 
