@@ -9,6 +9,8 @@ export interface SearchOpts {
   before?: number
   expandGraph?: boolean
   embedder?: Embedder | null
+  kinds?: string[] // restrict to these memory kinds (decision|gotcha|convention|fact|meeting|log)
+  pinned?: boolean // only pinned notes
 }
 
 export type MatchType = 'vector' | 'keyword' | 'both' | 'graph'
@@ -126,6 +128,8 @@ export async function search(db: DB, query: string, opts: SearchOpts = {}): Prom
 
   // recency boost for agent memories: newer supersedes older
   // ponytail: memory/ only, fixed half-life ~30d; make configurable when someone actually asks
+  // kind/pinned boost: pinned decisions beat same-score logs by ~2-3 ranks without junk-sticking forever
+  const HIGH_RANK_KINDS = new Set(['decision', 'gotcha', 'convention'])
   const now = Date.now()
   for (const e of entries) {
     const row = info.get(e.id)!
@@ -133,6 +137,8 @@ export async function search(db: DB, query: string, opts: SearchOpts = {}): Prom
       const ageDays = Math.max(0, (now - row.mtime) / 86_400_000)
       e.score *= 1 + 0.3 * Math.exp(-ageDays / 30)
     }
+    if (row.pinned === 1) e.score *= 1.4
+    if (row.kind && HIGH_RANK_KINDS.has(row.kind)) e.score *= 1.2
   }
 
   entries.sort((a, b) => b.score - a.score)
@@ -159,7 +165,15 @@ export async function search(db: DB, query: string, opts: SearchOpts = {}): Prom
 
 /** Pre-ranking filters -> allowed note paths, or null when unfiltered. */
 function allowedPaths(db: DB, opts: SearchOpts): Set<string> | null {
-  if (!opts.folder && !opts.tags?.length && opts.after == null && opts.before == null) return null
+  if (
+    !opts.folder &&
+    !opts.tags?.length &&
+    opts.after == null &&
+    opts.before == null &&
+    !opts.kinds?.length &&
+    opts.pinned == null
+  )
+    return null
   const where: string[] = []
   const params: unknown[] = []
   if (opts.folder) {
@@ -168,6 +182,11 @@ function allowedPaths(db: DB, opts: SearchOpts): Set<string> | null {
   }
   if (opts.after != null) (where.push('mtime >= ?'), params.push(opts.after))
   if (opts.before != null) (where.push('mtime <= ?'), params.push(opts.before))
+  if (opts.pinned) where.push('pinned = 1')
+  if (opts.kinds?.length) {
+    where.push(`kind IN (${opts.kinds.map(() => '?').join(',')})`)
+    params.push(...opts.kinds)
+  }
   for (const tag of opts.tags ?? []) {
     // nested tags: "project" matches "project/canvas"
     where.push(
@@ -197,13 +216,15 @@ interface ChunkRow {
   anchor: string | null
   text: string
   mtime: number
+  kind: string | null
+  pinned: number
 }
 
 function chunkInfo(db: DB, ids: number[]): Map<number, ChunkRow> {
   if (!ids.length) return new Map()
   const rows = db
     .prepare(
-      `SELECT c.id, c.note_path, c.heading, c.anchor, c.text, n.title, n.mtime
+      `SELECT c.id, c.note_path, c.heading, c.anchor, c.text, n.title, n.mtime, n.kind, n.pinned
        FROM chunks c JOIN notes n ON n.path = c.note_path
        WHERE c.id IN (${ids.map(() => '?').join(',')})`,
     )

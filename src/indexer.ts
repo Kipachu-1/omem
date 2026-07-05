@@ -38,11 +38,22 @@ function applyNote(db: DB, relPath: string, parsed: ParsedNote, hash: string, mt
     db.prepare('DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE note_path = ?)').run(relPath)
     db.prepare('DELETE FROM chunks WHERE note_path = ?').run(relPath)
     db.prepare('DELETE FROM edges WHERE src_path = ?').run(relPath)
+    // kind: stamp the memory class (decision|gotcha|convention|fact|meeting|log) for ranking/filtering.
+    // pinned: any truthy frontmatter value (bool, "true", 1) -> 1; frontmatter is untrusted so coerce defensively.
+    const kindRaw = parsed.frontmatter.kind
+    const kind = typeof kindRaw === 'string' ? kindRaw : null
+    const pinned = parsed.frontmatter.pinned === true ||
+      parsed.frontmatter.pinned === 'true' ||
+      parsed.frontmatter.pinned === 1 ||
+      parsed.frontmatter.pinned === '1'
+      ? 1
+      : 0
     db.prepare(
-      `INSERT INTO notes(path, title, frontmatter, mtime, hash) VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO notes(path, title, frontmatter, mtime, hash, kind, pinned) VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(path) DO UPDATE SET title = excluded.title, frontmatter = excluded.frontmatter,
-                                       mtime = excluded.mtime, hash = excluded.hash`,
-    ).run(relPath, parsed.title, JSON.stringify(parsed.frontmatter), mtime, hash)
+                                       mtime = excluded.mtime, hash = excluded.hash,
+                                       kind = excluded.kind, pinned = excluded.pinned`,
+    ).run(relPath, parsed.title, JSON.stringify(parsed.frontmatter), mtime, hash, kind, pinned)
 
     const insChunk = db.prepare('INSERT INTO chunks(note_path, heading, anchor, position, text) VALUES (?, ?, ?, ?, ?)')
     const insFts = db.prepare('INSERT INTO chunks_fts(rowid, text) VALUES (?, ?)')

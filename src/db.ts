@@ -18,7 +18,9 @@ export function openDb(dbPath: string): DB {
       title       TEXT NOT NULL,      -- frontmatter title, else filename sans .md
       frontmatter TEXT,               -- raw JSON
       mtime       INTEGER NOT NULL,   -- ms
-      hash        TEXT NOT NULL       -- sha256 of file content
+      hash        TEXT NOT NULL,      -- sha256 of file content
+      kind        TEXT,                -- memory class: decision|gotcha|convention|fact|meeting|log (nullable)
+      pinned      INTEGER NOT NULL DEFAULT 0  -- 1 if frontmatter pinned is truthy
     );
 
     CREATE TABLE IF NOT EXISTS chunks (
@@ -53,6 +55,21 @@ export function openDb(dbPath: string): DB {
     CREATE INDEX IF NOT EXISTS edges_wikilink_lraw ON edges(lower(raw)) WHERE type = 'wikilink';
     CREATE INDEX IF NOT EXISTS edges_wikilink_dst ON edges(dst) WHERE type = 'wikilink';
   `)
+
+  // upgrade path for existing dbs created before kind/pinned existed.
+  // CREATE TABLE IF NOT EXISTS won't add columns to an existing table, so ALTER.
+  // Each wrapped in its own try/catch so re-running openDb is idempotent.
+  for (const col of ['kind TEXT', 'pinned INTEGER NOT NULL DEFAULT 0'] as const) {
+    const name = col.split(' ')[0]
+    try {
+      db.exec(`ALTER TABLE notes ADD COLUMN ${col}`)
+    } catch (e) {
+      // SQLite error "duplicate column name" -> already migrated; anything else rethrows
+      const msg = (e as Error).message
+      if (!/duplicate column name/i.test(msg)) throw e
+      void name
+    }
+  }
   return db
 }
 
