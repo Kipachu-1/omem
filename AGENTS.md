@@ -56,3 +56,4 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 - `npm run prepack` — build (tsc -p tsconfig.build.json)
 - `npm view @kipachu/omem@<x.y.z> version` — confirm a version is published to npm
 - `OMEM_USAGE_LOG=off|json|stats` — per-tool-call stderr log mode (default `json`); `memory_usage` MCP tool returns aggregate counts
+

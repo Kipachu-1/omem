@@ -25,3 +25,4 @@ RUN npm i -g @kipachu/omem@0.7.0
 ENV OMEM_VAULT=/vault OMEM_GIT=1
 COPY start.sh /start.sh
 CMD ["sh", "/start.sh"]
+
