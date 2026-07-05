@@ -91,13 +91,40 @@ function resolveLink(db: DB, target: string): string | null {
  * converges to what a rebuild would produce: unresolved links heal when their
  * target appears, resolved links move when a better candidate appears, and
  * links resolved via a title that changed fall back to unresolved.
+ *
+ * Performance: only fetches edges whose `raw` could possibly refer to this note
+ * (via the lowercased basename / path / title / path-suffix matches below) plus
+ * edges already resolved to this note — backed by the `edges_wikilink_lraw` and
+ * `edges_wikilink_dst` partial indexes. The JS filter then applies the exact
+ * `refersHere`/`pointsHere` check, so the query is a strict superset of matches
+ * (over-fetch is safe; under-fetch would silently break convergence).
  */
-// ponytail: scans all wikilink edges per indexed note; fine for personal vaults, index raw if it ever shows up in a profile
 function reResolve(db: DB, notePath: string, title: string): void {
   const lowerPath = notePath.toLowerCase().replace(/\.md$/, '')
   const base = lowerPath.split('/').pop()!
   const lowerTitle = title.toLowerCase()
-  const rows = db.prepare("SELECT src_path, dst, resolved, raw FROM edges WHERE type = 'wikilink'").all() as {
+
+  // candidate d-values (d = lower(raw) with a trailing .md stripped) that the
+  // refersHere check can match: basename, full path, title, and every path
+  // suffix (for the lowerPath.endsWith('/' + d) branch, which only adds
+  // candidates beyond base/lowerPath for paths with 3+ segments).
+  const dVals = new Set<string>([base, lowerPath, lowerTitle])
+  const segs = lowerPath.split('/')
+  for (let i = 1; i < segs.length - 1; i++) dVals.add(segs.slice(i).join('/'))
+  // raw may or may not carry a trailing .md; cover both spellings per d-value.
+  const cands: string[] = []
+  for (const d of dVals) {
+    cands.push(d)
+    cands.push(d + '.md')
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT src_path, dst, resolved, raw FROM edges
+       WHERE type = 'wikilink'
+         AND (lower(raw) IN (${cands.map(() => '?').join(',')}) OR (resolved = 1 AND dst = ?))`,
+    )
+    .all(...cands, notePath) as {
     src_path: string
     dst: string
     resolved: number
