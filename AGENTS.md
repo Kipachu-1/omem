@@ -32,6 +32,7 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 - **Token safety**: GitHub tokens for sync come from `OMEM_GIT_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` and are passed to git's credential helper via env (never argv), so they don't leak via `ps`. `start.sh` clones with the token in the URL once, then resets the remote to the plain URL so the secret never persists in `.git/config`.
 - **Embedding model swap**: changing `OMEM_EMBED_MODEL` against an already-indexed vault requires `omem rebuild` — the index records the model in the `meta` table and `embedPending` will refuse to run with a mismatched model. This is by design (a half-embedded index is worse than none).
 - `/healthz` on HTTP serve is unauthenticated by design; auth is opt-in via `OMEM_HTTP_TOKEN`. The serve startup logs a loud warning if the token is unset.
+- **CI disabled** (2026-07-05): GitHub Actions workflow `ci.yml` is `disabled_manually` (billing lock on the Kipachu-1 account). There is NO CI backstop — agents must run `npm run typecheck` + `npm test` locally and confirm green before opening a PR. Re-enable via `gh workflow enable ci` or the GitHub UI once billing is resolved.
 
 ## Architecture
 - **Entry**: `src/cli.ts` (the `omem` command). `applyEnvDefaults()` must run before any other import reads env.
