@@ -8,7 +8,7 @@ import matter from 'gray-matter'
 import type { DB } from './db.ts'
 import { getClientSeen, setClientSeen } from './db.ts'
 import { indexFile, deleteNote, embedPending, SKIP_DIRS } from './indexer.ts'
-import { search } from './search.ts'
+import { search, recall } from './search.ts'
 import type { Embedder } from './embed.ts'
 
 /**
@@ -18,10 +18,10 @@ import type { Embedder } from './embed.ts'
  * Keep under ~400 chars; some clients silently trim long instructions.
  */
 const INSTRUCTIONS =
-  'Shared Obsidian memory vault via omem. memory_search FIRST before answering anything ' +
-  'touching prior context (decisions, conventions, people, gotchas). Search before memory_write ' +
-  'to avoid duplicates. memory_get_note for full notes, memory_recent (since:"lastSeen") for what ' +
-  'changed since last look, memory_list to browse, memory_status for a snapshot. Be conservative — prefer append mode.'
+  'Shared Obsidian memory vault via omem. memory_recall before acting (groups by kind, pinned first); ' +
+  'memory_search FIRST for prior context (decisions, conventions, people, gotchas). Search before ' +
+  'memory_write to avoid duplicates. memory_get_note for full notes, memory_recent (since:lastSeen) ' +
+  'for what changed, memory_list to browse, memory_status for a snapshot. Prefer append mode.'
 
 /**
  * Stable client identity for a stdio serve process: an explicit env override wins (lets agents
@@ -149,6 +149,48 @@ export function buildServer(
         embedder,
       })
       return json(results.map(r => ({ ...r, link: deepLink(r.notePath) })))
+    },
+  )
+
+  server.registerTool(
+    'memory_recall',
+    {
+      title: 'Recall relevant context for a task',
+      description:
+        'One-call context retrieval for a task, question, or topic. Returns ranked results ' +
+        'grouped by kind (decision / gotcha / convention / fact / meeting / log), with ' +
+        'pinned items and load-bearing kinds (decision, gotcha, convention) boosted to the top. ' +
+        'Use this before acting on anything that may have prior context, instead of guessing ' +
+        'a query for memory_search.',
+      inputSchema: {
+        context: z.string().describe('the task, question, or topic to recall for (natural language)'),
+        limit: z.number().int().min(1).max(50).optional().describe('total results, default 20'),
+        kinds: z
+          .array(kindSchema)
+          .optional()
+          .describe('restrict to these kinds; default = all'),
+        pinnedOnly: z.boolean().optional().describe('only return pinned notes (highest-signal quick mode)'),
+        folder: z.string().optional().describe('restrict to a folder prefix'),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async a => {
+      if (!a.context.trim()) throw new Error('context required')
+      const r = await recall(db, a.context, {
+        limit: a.limit,
+        kinds: a.kinds,
+        pinnedOnly: a.pinnedOnly,
+        folder: a.folder,
+        embedder,
+      })
+      const withLinks = (arr: { notePath: string }[]) =>
+        arr.map(x => ({ ...x, link: deepLink(x.notePath) }))
+      return json({
+        query: r.query,
+        grouped: Object.fromEntries(Object.entries(r.grouped).map(([k, v]) => [k, withLinks(v)])),
+        related: withLinks(r.related),
+        totalScanned: r.totalScanned,
+      })
     },
   )
 

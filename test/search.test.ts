@@ -1,12 +1,12 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { cpSync, mkdtempSync, rmSync, utimesSync } from 'node:fs'
+import { cpSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openDb, type DB } from '../src/db.ts'
 import { fullIndex, embedPending } from '../src/indexer.ts'
-import { search } from '../src/search.ts'
+import { search, recall, noteMeta } from '../src/search.ts'
 import type { Embedder } from '../src/embed.ts'
 
 // deterministic bag-of-words embedder: real similarity behavior, no model download
@@ -152,4 +152,57 @@ test('after + before window returns only notes inside the window', async () => {
   })
   assert.ok(r.some(x => x.notePath === 'memory/2026-06-28-prefers-spaces.md'), '60d-old note inside window')
   assert.ok(!r.some(x => x.notePath === 'memory/2026-07-01-prefers-tabs.md'), 'fresh note outside window')
+})
+
+// --- recall: kind bucketing (delegates filtering/boost to search, reads notes.kind/pinned columns) ---
+
+function writeKindNote(kind: string, title: string, pinned: boolean, body: string): string {
+  const path = `memory/${kind}-${title.replace(/\s+/g, '-').toLowerCase()}.md`
+  const fm = `---\ntitle: ${title}\nkind: ${kind}${pinned ? '\npinned: true' : ''}\n---\n`
+  writeFileSync(join(vault, path), `${fm}\n${body}\n`)
+  return path
+}
+
+test('noteMeta reads kind/pinned from the notes columns', () => {
+  const a = writeKindNote('decision', 'Recall Decision A', true, 'numbat release needs the pouch checklist')
+  const b = writeKindNote('log', 'Recall Log B', false, 'numbat release ran today, nothing notable')
+  fullIndex(db, vault)
+  const m = noteMeta(db, [a, b, 'notes/missing.md'])
+  assert.equal(m.get(a)?.kind, 'decision')
+  assert.equal(m.get(a)?.pinned, 1)
+  assert.equal(m.get(b)?.kind, 'log')
+  assert.equal(m.get(b)?.pinned, 0)
+  assert.equal(m.get('notes/missing.md'), undefined, 'missing paths absent from the map')
+})
+
+test('recall groups results by kind and boosts pinned decisions above logs (keyword-only)', async () => {
+  const dPin = writeKindNote('decision', 'Recall Decision Pinned', true, 'wombat deploy decision pinned body')
+  const dPlain = writeKindNote('decision', 'Recall Decision Plain', false, 'wombat deploy decision plain body')
+  const lg = writeKindNote('log', 'Recall Log Plain', false, 'wombat deploy log plain body')
+  fullIndex(db, vault)
+
+  const r = await recall(db, 'wombat deploy', { embedder: null })
+  assert.equal(r.query, 'wombat deploy')
+  assert.equal(r.grouped.decision.length, 2, `expected 2 decisions, got ${r.grouped.decision.length}`)
+  assert.ok(r.grouped.log.length >= 1, 'log bucket populated')
+  assert.equal(r.grouped.decision[0].notePath, dPin, 'pinned decision ranks first within its bucket')
+  for (const k of ['decision', 'gotcha', 'convention', 'fact', 'meeting', 'log'])
+    assert.ok(Array.isArray(r.grouped[k]), `grouped.${k} must be an array`)
+  assert.equal(typeof r.totalScanned, 'number')
+  // log note is not miscategorized into the decision bucket
+  assert.ok(!r.grouped.decision.some((x: { notePath: string }) => x.notePath === lg), 'log must not appear in grouped.decision')
+})
+
+test('recall kinds filter restricts to requested buckets', async () => {
+  const r = await recall(db, 'wombat deploy', { embedder: null, kinds: ['log'] })
+  assert.ok(r.grouped.log.length > 0, 'log bucket populated under kinds filter')
+  assert.equal(r.grouped.decision.length, 0, 'decision bucket empty under kinds:["log"]')
+})
+
+test('recall pinnedOnly returns only pinned notes', async () => {
+  const r = await recall(db, 'wombat deploy', { embedder: null, pinnedOnly: true })
+  const all = [...r.grouped.decision, ...r.grouped.log, ...r.related]
+  assert.ok(all.length > 0, 'pinnedOnly must return the pinned decision')
+  for (const x of all)
+    assert.equal(x.notePath, 'memory/decision-recall-decision-pinned.md', `only pinned note expected, got ${x.notePath}`)
 })

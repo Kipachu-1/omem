@@ -58,11 +58,11 @@ test('server advertises memory-usage instructions', async () => {
   assert.ok(instructions!.length <= 400, `instructions must stay under ~400 chars (got ${instructions!.length})`)
 })
 
-test('exposes exactly the nine memory tools', async () => {
+test('exposes exactly the ten memory tools', async () => {
   const { tools } = await client.listTools()
   assert.deepEqual(
     tools.map(t => t.name).sort(),
-    ['memory_archive', 'memory_get_note', 'memory_list', 'memory_move', 'memory_recent', 'memory_search', 'memory_status', 'memory_sync', 'memory_write'],
+    ['memory_archive', 'memory_get_note', 'memory_list', 'memory_move', 'memory_recall', 'memory_recent', 'memory_search', 'memory_status', 'memory_sync', 'memory_write'],
   )
 })
 
@@ -449,4 +449,67 @@ test('memory_recent since:"1h"/"1d"/"7d" resolve to a rolling window without tou
   // wider windows never exclude notes that narrower ones include
   assert.ok(w.notes.length >= d.notes.length, '7d ⊇ 1d')
   assert.ok(d.notes.length >= h.notes.length, '1d ⊇ 1h')
+})
+
+test('memory_recall groups results by kind, boosts pinned decisions above logs', async () => {
+  const KINDS = ['decision', 'gotcha', 'convention', 'fact', 'meeting', 'log'] as const
+  // two decisions (one pinned), one gotcha, one log — all about "quokka deployment"
+  const d1 = await call('memory_write', {
+    title: 'Quokka Deploy Decision', content: 'Quokka deploys require the marsupial preflight checklist.',
+    tags: ['memory', 'deploy'], links: ['Canvas Renderer'], kind: 'decision', frontmatter: { pinned: true },
+  })
+  const d2 = await call('memory_write', {
+    title: 'Quokka Rollback Decision', content: 'Quokka rollback strategy uses the pouch snapshot.',
+    tags: ['memory', 'deploy'], kind: 'decision',
+  })
+  const g = await call('memory_write', {
+    title: 'Quokka Gotcha', content: 'Quokka deploys fail if the eucalyptus cache is cold.',
+    tags: ['memory', 'deploy'], kind: 'gotcha',
+  })
+  const lg = await call('memory_write', {
+    title: 'Quokka Deploy Log', content: 'Quokka deploy ran today, nothing notable.',
+    tags: ['memory', 'deploy'], kind: 'log',
+  })
+
+  const r = await call('memory_recall', { context: 'quokka deployment', limit: 20 })
+  assert.equal(r.query, 'quokka deployment')
+  for (const k of KINDS) assert.ok(Array.isArray(r.grouped[k]), `grouped.${k} must be an array`)
+  const decisions = r.grouped.decision.map((x: { notePath: string }) => x.notePath)
+  assert.ok(decisions.includes(d1.path), 'pinned decision must be in grouped.decision')
+  assert.ok(decisions.includes(d2.path), 'second decision must be in grouped.decision')
+  assert.equal(decisions[0], d1.path, 'pinned decision must rank first in its bucket')
+  assert.ok(r.grouped.gotcha.some((x: { notePath: string }) => x.notePath === g.path), 'gotcha must be in grouped.gotcha')
+  assert.ok(r.grouped.log.some((x: { notePath: string }) => x.notePath === lg.path), 'log must be in grouped.log')
+  for (const x of [...r.grouped.decision, ...r.grouped.gotcha, ...r.grouped.log, ...r.related])
+    assert.ok(x.link.startsWith('obsidian://open?vault='), 'recall results must carry obsidian:// links')
+  assert.equal(typeof r.totalScanned, 'number')
+})
+
+test('memory_recall kinds filter restricts to requested buckets', async () => {
+  const r = await call('memory_recall', { context: 'quokka deployment', kinds: ['gotcha'] })
+  assert.ok(r.grouped.gotcha.length > 0, 'gotcha bucket populated')
+  for (const k of ['decision', 'convention', 'fact', 'meeting', 'log'])
+    assert.equal(r.grouped[k].length, 0, `bucket ${k} must be empty under kinds:['gotcha']`)
+})
+
+test('memory_recall pinnedOnly returns only pinned notes', async () => {
+  const r = await call('memory_recall', { context: 'quokka deployment', pinnedOnly: true })
+  // the pinned decision is present in its bucket
+  assert.ok(r.grouped.decision.some((x: { notePath: string }) => x.notePath.includes('quokka-deploy-decision')), 'pinned decision must appear under pinnedOnly')
+  // the UNpinned quokka notes (d2 decision + the log) are filtered out everywhere
+  const all = [...r.grouped.decision, ...r.grouped.gotcha, ...r.grouped.convention, ...r.grouped.fact, ...r.grouped.meeting, ...r.grouped.log, ...r.related]
+  assert.ok(!all.some((x: { notePath: string }) => x.notePath.includes('quokka-rollback-decision')), 'unpinned decision must be excluded under pinnedOnly')
+  assert.ok(!all.some((x: { notePath: string }) => x.notePath.includes('quokka-deploy-log')), 'unpinned log must be excluded under pinnedOnly')
+})
+
+test('memory_recall rejects empty context', async () => {
+  const res = (await client.callTool({ name: 'memory_recall', arguments: { context: '   ' } })) as { isError?: boolean }
+  assert.ok(res.isError, 'empty context must be rejected')
+})
+
+test('memory_recall is advertised as read-only', async () => {
+  const { tools } = await client.listTools()
+  const tool = tools.find(t => t.name === 'memory_recall')
+  assert.ok(tool, 'memory_recall must be listed')
+  assert.equal(tool.annotations?.readOnlyHint, true, 'memory_recall must declare readOnlyHint')
 })

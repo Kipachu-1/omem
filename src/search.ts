@@ -163,6 +163,85 @@ export async function search(db: DB, query: string, opts: SearchOpts = {}): Prom
   return out
 }
 
+/** Per-kind caps for recall bucketing — high-signal kinds get more slots. */
+const KIND_CAPS: Record<string, number> = {
+  decision: 5,
+  gotcha: 3,
+  convention: 3,
+  fact: 3,
+  meeting: 2,
+  log: 2,
+}
+
+/** Fetch `{ kind, pinned }` for a set of note paths from the `notes.kind`/`notes.pinned`
+ *  columns (landed by OME-14). */
+export function noteMeta(db: DB, paths: string[]): Map<string, { kind: string | null; pinned: number }> {
+  if (!paths.length) return new Map()
+  const rows = db
+    .prepare(`SELECT path, kind, pinned FROM notes WHERE path IN (${paths.map(() => '?').join(',')})`)
+    .all(...paths) as { path: string; kind: string | null; pinned: number }[]
+  return new Map(rows.map(r => [r.path, { kind: r.kind, pinned: r.pinned }]))
+}
+
+export interface RecallOpts {
+  limit?: number
+  kinds?: string[]
+  pinnedOnly?: boolean
+  folder?: string
+  embedder?: Embedder | null
+}
+
+export interface RecallResult {
+  query: string
+  grouped: Record<string, SearchResult[]>
+  related: SearchResult[]
+  totalScanned: number
+}
+
+/** One-call context retrieval: search (which already filters by kind/pinned and applies the
+ *  pinned ×1.4 / load-bearing-kind ×1.2 boost) → bucket by kind with per-kind caps → fill
+ *  `related` up to `limit`. A thin layer over `search()`, not a fork of it. */
+export async function recall(db: DB, context: string, opts: RecallOpts = {}): Promise<RecallResult> {
+  const limit = opts.limit ?? 20
+  // over-fetch so bucketing has headroom after per-kind capping
+  const results = await search(db, context, {
+    limit: Math.min(50, limit * 3),
+    folder: opts.folder,
+    kinds: opts.kinds,
+    pinned: opts.pinnedOnly,
+    expandGraph: true,
+    embedder: opts.embedder,
+  })
+
+  const paths = [...new Set(results.map(r => r.notePath))]
+  const meta = noteMeta(db, paths)
+
+  // bucket by kind (results arrive pre-sorted by boosted score from search); each note lands once
+  const grouped: Record<string, SearchResult[]> = {
+    decision: [],
+    gotcha: [],
+    convention: [],
+    fact: [],
+    meeting: [],
+    log: [],
+  }
+  const used = new Set<string>()
+  for (const r of results) {
+    const k = meta.get(r.notePath)?.kind
+    if (k && grouped[k] && grouped[k].length < KIND_CAPS[k] && !used.has(r.notePath)) {
+      grouped[k].push(r)
+      used.add(r.notePath)
+    }
+  }
+
+  // related: top remaining by score, filling up to `limit`
+  const groupedTotal = Object.values(grouped).reduce((n, b) => n + b.length, 0)
+  const relatedCap = Math.max(0, limit - groupedTotal)
+  const related = results.filter(r => !used.has(r.notePath)).slice(0, relatedCap)
+
+  return { query: context, grouped, related, totalScanned: results.length }
+}
+
 /** Pre-ranking filters -> allowed note paths, or null when unfiltered. */
 function allowedPaths(db: DB, opts: SearchOpts): Set<string> | null {
   if (
