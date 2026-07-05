@@ -102,6 +102,24 @@ test('memory_search folder filter works over MCP', async () => {
   for (const x of r) assert.ok(x.notePath.startsWith('projects/'), x.notePath)
 })
 
+test('memory_search after/before filter scope results by mtime', async () => {
+  // after far in the future: nothing qualifies
+  const future = Date.now() + 365 * 86_400_000
+  const r = await call('memory_search', { query: 'canvas rendering performance', after: future })
+  assert.deepEqual(r, [])
+  // after 1 day ago keeps the fixture's fresh notes, drops nothing because canvas isn't aged
+  const r2 = await call('memory_search', { query: 'canvas rendering performance', after: Date.now() - 86_400_000 })
+  assert.ok(r2.length > 0, 'fresh notes must remain with a recent after cutoff')
+})
+
+test('memory_search rejects non-numeric after value via zod', async () => {
+  const res = (await client.callTool({
+    name: 'memory_search',
+    arguments: { query: 'canvas', after: 'yesterday' },
+  })) as { isError?: boolean }
+  assert.ok(res.isError, 'a string for after must be rejected by the schema')
+})
+
 test('memory_write creates a note that is immediately searchable, then append and overwrite update it', async () => {
   const w = await call('memory_write', {
     title: 'Zebra Deployment Rule',

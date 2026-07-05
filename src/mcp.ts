@@ -73,6 +73,8 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
         limit: z.number().int().min(1).max(50).optional().describe('max results, default 10'),
         folder: z.string().optional().describe("restrict to a folder prefix, e.g. 'islands/y-agents'"),
         tags: z.array(z.string()).optional().describe('require all of these tags (nested tags match by prefix)'),
+        after: z.number().int().optional().describe('ms epoch; only notes with mtime >= this are eligible'),
+        before: z.number().int().optional().describe('ms epoch; only notes with mtime <= this are eligible'),
         expandGraph: z.boolean().optional().describe('include 1-hop wikilink neighbors of top hits, default true'),
       },
       annotations: { readOnlyHint: true },
@@ -82,6 +84,8 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
         limit: a.limit,
         folder: a.folder,
         tags: a.tags,
+        after: a.after,
+        before: a.before,
         expandGraph: a.expandGraph,
         embedder,
       })

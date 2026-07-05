@@ -128,3 +128,24 @@ test('filters with zero matching notes return empty fast', async () => {
   const r = await search(db, 'canvas', { embedder: fake, folder: 'nonexistent' })
   assert.deepEqual(r, [])
 })
+
+test('after: excludes notes older than the cutoff', async () => {
+  // memory/2026-06-28-prefers-spaces.md is aged 60 days back in before(); 1 day ago should drop it
+  const cutoff = Date.now() - 86_400_000
+  const r = await search(db, 'indentation', { embedder: null, after: cutoff })
+  assert.ok(!r.some(x => x.notePath === 'memory/2026-06-28-prefers-spaces.md'), 'stale note must be excluded by after')
+})
+
+test('after + before window returns only notes inside the window', async () => {
+  // window far in the future: no fixture note has an mtime that late -> empty
+  const far = Date.now() + 365 * 86_400_000
+  const r = await search(db, 'canvas', { embedder: fake, after: far, before: far + 1000 })
+  assert.deepEqual(r, [])
+  // window straddling 'now' keeps fresh notes, drops the 60-day-stale one
+  const r2 = await search(db, 'indentation', {
+    embedder: null,
+    after: Date.now() - 30 * 86_400_000,
+    before: Date.now() + 1000,
+  })
+  assert.ok(!r2.some(x => x.notePath === 'memory/2026-06-28-prefers-spaces.md'), 'stale note outside window must be excluded')
+})

@@ -23,7 +23,7 @@ ${cmdLine('index', 'full sync (incremental via content hashes)')}
 ${cmdLine('watch', 'sync, then watch the vault and index changes live ' + dim('[--poll N: also full-sync every N seconds]'))}
 ${cmdLine('serve', `watch + MCP server on stdio (the normal run mode; --poll defaults to 30)
            ${dim('--port N serves MCP over HTTP instead; set OMEM_HTTP_TOKEN to require bearer auth')}`)}
-${cmdLine('search', `query the index:  omem search "how does X work" ${dim('[--json] [--limit N] [--folder F] [--tag T] [--keyword-only]')}`)}
+${cmdLine('search', `query the index:  omem search "how does X work" ${dim('[--json] [--limit N] [--folder F] [--tag T] [--after D] [--before D] [--keyword-only]')}`)}
 ${cmdLine('sync', 'git commit + pull + push the vault once (cron-friendly)')}
 ${cmdLine('rebuild', 'drop the index and re-sync from scratch')}
 ${cmdLine('stats', 'note/chunk/edge counts, pending embeddings')}
@@ -45,6 +45,8 @@ const { values, positionals } = parseArgs({
     limit: { type: 'string' },
     folder: { type: 'string' },
     tag: { type: 'string', multiple: true },
+    after: { type: 'string' },
+    before: { type: 'string' },
     'keyword-only': { type: 'boolean' },
     poll: { type: 'string' },
     port: { type: 'string' },
@@ -98,6 +100,26 @@ function parseLimit(): number | undefined {
     process.exit(1)
   }
   return n
+}
+
+/** Accept either an ISO-8601 date or a ms-epoch integer; undefined = unset. */
+function parseTime(raw: string | undefined, flag: string): number | undefined {
+  if (raw === undefined) return undefined
+  // pure integer -> treat as ms epoch; otherwise try ISO-8601
+  if (/^\d+$/.test(raw)) {
+    const n = Number(raw)
+    if (!Number.isInteger(n) || n < 0) {
+      console.error(`error: ${flag} must be an ISO-8601 date or ms-epoch integer, got "${raw}"`)
+      process.exit(1)
+    }
+    return n
+  }
+  const ms = Date.parse(raw)
+  if (Number.isNaN(ms)) {
+    console.error(`error: ${flag} must be an ISO-8601 date or ms-epoch integer, got "${raw}"`)
+    process.exit(1)
+  }
+  return ms
 }
 
 function parsePoll(fallback: number): number {
@@ -267,6 +289,8 @@ async function main(): Promise<void> {
         limit: parseLimit(),
         folder: values.folder,
         tags: values.tag,
+        after: parseTime(values.after, '--after'),
+        before: parseTime(values.before, '--before'),
         embedder: values['keyword-only'] ? null : embedder,
       })
       sp.done()
