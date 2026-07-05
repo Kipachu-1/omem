@@ -62,7 +62,7 @@ test('exposes exactly the eleven memory tools', async () => {
   const { tools } = await client.listTools()
   assert.deepEqual(
     tools.map(t => t.name).sort(),
-    ['memory_archive', 'memory_get_note', 'memory_graph', 'memory_list', 'memory_move', 'memory_recall', 'memory_recent', 'memory_search', 'memory_status', 'memory_sync', 'memory_write'],
+    ['memory_archive', 'memory_get_note', 'memory_list', 'memory_move', 'memory_recall', 'memory_recent', 'memory_search', 'memory_status', 'memory_sync', 'memory_usage', 'memory_write'],
   )
 })
 
@@ -616,144 +616,105 @@ test('memory_recall is advertised as read-only', async () => {
   assert.equal(tool.annotations?.readOnlyHint, true, 'memory_recall must declare readOnlyHint')
 })
 
-// ---- OME-16: memory_graph — one-call note neighborhood ----
+// ---- OME-15: memory_usage observability log + memory_usage tool ----
 
-test('memory_graph is advertised as read-only', async () => {
-  const { tools } = await client.listTools()
-  const tool = tools.find(t => t.name === 'memory_graph')
-  assert.ok(tool, 'memory_graph must be listed')
-  assert.equal(tool.annotations?.readOnlyHint, true, 'memory_graph must declare readOnlyHint')
-})
-
-test('memory_graph missing seed errors with note not found', async () => {
-  const res = (await client.callTool({
-    name: 'memory_graph',
-    arguments: { path: 'notes/does-not-exist.md' },
-  })) as { isError?: boolean; content: { text: string }[] }
-  assert.ok(res.isError, 'missing seed must error')
-  assert.match(res.content[0].text, /note not found: notes\/does-not-exist\.md/)
-})
-
-test('memory_graph outgoing-only returns wikilink targets and no incoming', async () => {
-  // hub.md links to Canvas Renderer, Bob Smith, GPU Profiling, Coding Style, Alpha, Beta, Gamma, Delta
-  const r = await call('memory_graph', { path: 'notes/hub.md', outgoing: true, incoming: false })
-  assert.equal(r.seed.path, 'notes/hub.md')
-  const outPaths = r.outgoing.map((x: { path: string }) => x.path)
-  assert.ok(outPaths.includes('projects/canvas.md'), 'outgoing must include the canvas note')
-  assert.ok(outPaths.includes('people/bob-smith.md'), 'outgoing must include bob-smith')
-  assert.ok(outPaths.includes('notes/gpu-profiling.md'), 'outgoing must include gpu-profiling')
-  assert.equal(r.incoming.length, 0, 'incoming disabled -> empty')
-  for (const x of r.outgoing) {
-    assert.equal(x.hop, 1)
-    assert.equal(x.score, 1.0)
-    assert.equal(typeof x.title, 'string')
-  }
-})
-
-test('memory_graph incoming-only returns backlinks', async () => {
-  // projects/canvas.md and notes/hub.md both link to [[Bob Smith]]
-  const r = await call('memory_graph', { path: 'people/bob-smith.md', outgoing: false, incoming: true })
-  const inPaths = r.incoming.map((x: { path: string }) => x.path)
-  assert.ok(inPaths.includes('projects/canvas.md'), 'canvas backlinks to bob-smith')
-  assert.ok(inPaths.includes('notes/hub.md'), 'hub backlinks to bob-smith')
-  assert.equal(r.outgoing.length, 0, 'outgoing disabled -> empty')
-})
-
-test('memory_graph k=2 expands one more hop on outgoing', async () => {
-  // build a deterministic chain A -> B -> C so hop2 surfaces a note NOT linked by A directly
-  const a = await call('memory_write', {
-    title: 'Chain A', content: 'start of the chain', folder: 'inbox', links: ['Chain B'],
+/** Spawn a fresh stdio serve on an isolated vault with optional env + stderr capture. */
+const spawnUsageClient = async (opts: { env?: Record<string, string>; stderr?: 'ignore' | 'pipe' } = {}) => {
+  const v = mkdtempSync(join(tmpdir(), 'omem-usage-'))
+  cpSync(FIXTURE, v, { recursive: true })
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [join(ROOT, 'src/cli.ts'), 'serve', '--vault', v, '--poll', '3600'],
+    env: { ...process.env, ...opts.env } as Record<string, string>,
+    stderr: opts.stderr ?? 'ignore',
   })
-  const b = await call('memory_write', {
-    title: 'Chain B', content: 'middle of the chain', folder: 'inbox', links: ['Chain C'],
-  })
-  const c = await call('memory_write', {
-    title: 'Chain C', content: 'end of the chain', folder: 'inbox',
-  })
-  const r = await call('memory_graph', { path: a.path, outgoing: true, incoming: false, k: 2 })
-  const byHop = new Map<number, string[]>()
-  for (const x of r.outgoing) {
-    const arr = byHop.get(x.hop) ?? []
-    arr.push(x.path)
-    byHop.set(x.hop, arr)
-  }
-  assert.ok(byHop.has(1) && byHop.get(1)!.includes(b.path), 'hop 1 must include B')
-  assert.ok(byHop.has(2) && byHop.get(2)!.includes(c.path), 'k=2 must surface C at hop 2')
-  // no path appears at two hops
-  const all = r.outgoing.map((x: { path: string }) => x.path)
-  assert.equal(new Set(all).size, all.length, 'a neighbor appears at exactly one hop')
-})
+  const c = new Client({ name: 'omem-usage-test', version: '0.0.0' })
+  await c.connect(transport)
+  return { c, v, transport }
+}
 
-test('memory_graph byTag returns notes sharing a tag', async () => {
-  const a = await call('memory_write', {
-    title: 'Tag Share A', content: 'shares a tag', folder: 'inbox',
-    tags: ['project/graph-test'],
-  })
-  const b = await call('memory_write', {
-    title: 'Tag Share B', content: 'shares a tag too', folder: 'inbox',
-    tags: ['project/graph-test', 'extra'],
-  })
-  const r = await call('memory_graph', { path: a.path, outgoing: false, incoming: false, byTag: true })
-  const tagPaths = r.byTag.map((x: { path: string }) => x.path)
-  assert.ok(tagPaths.includes(b.path), 'byTag must include the other note sharing the tag')
-  const entry = r.byTag.find((x: { path: string }) => x.path === b.path)
-  assert.ok(entry && entry.sharedTags.includes('project/graph-test'), 'sharedTags lists the shared tag')
-  assert.ok(!tagPaths.includes(a.path), 'seed must not be listed as its own tag neighbor')
-})
-
-test('memory_graph byEmbedding returns similar notes without error', async () => {
-  // embeddings may still be settling at boot; retry until a similar note shows or settle window ends
-  let r: any
-  await untilSettled(async () => {
-    r = await call('memory_graph', { path: 'projects/canvas.md', outgoing: false, incoming: false, byEmbedding: true })
-    return Array.isArray(r.byEmbedding) && r.byEmbedding.length > 0
-  })
-  assert.ok(Array.isArray(r.byEmbedding), 'byEmbedding is an array')
-  assert.ok(r.byEmbedding.length > 0, 'embedding-similar notes must surface for canvas')
-  for (const x of r.byEmbedding) {
-    assert.equal(typeof x.score, 'number')
-    assert.ok(x.score > 0, 'cosine score is a positive number')
-    assert.ok(x.path !== 'projects/canvas.md', 'seed excluded from byEmbedding')
-    assert.ok(x.link.startsWith('obsidian://open?vault='))
-  }
-})
-
-test('memory_graph full neighborhood dedups across lists and caps on limit', async () => {
-  const r = await call('memory_graph', { path: 'notes/hub.md', outgoing: true, incoming: true, byTag: false, byEmbedding: false, limit: 3 })
-  assert.equal(r.totalNodes, 3, 'limit caps the total union')
-  const allPaths = [...r.outgoing, ...r.incoming].map((x: { path: string }) => x.path)
-  assert.equal(new Set(allPaths).size, allPaths.length, 'no path listed twice across outgoing+incoming')
-})
-
-test('memory_graph byEmbedding returns [] without error on a vault with no embeddings', async () => {
-  // empty vault has no notes → no chunks → no embeddings; byEmbedding must degrade to []
-  const emptyVault = mkdtempSync(join(tmpdir(), 'omem-graph-noemb-'))
-  const emptyClient = new Client({ name: 'omem-graph-noemb', version: '0.0.0' })
-  await emptyClient.connect(
-    new StdioClientTransport({
-      command: process.execPath,
-      args: [join(ROOT, 'src/cli.ts'), 'serve', '--vault', emptyVault, '--poll', '3600'],
-      stderr: 'ignore',
-    }),
-  )
+test('memory_usage aggregates per-tool call counts on a fresh process', async () => {
+  const { c, v } = await spawnUsageClient()
   try {
-    // write a note so the seed exists, but embeddings haven't run (or vault has none yet)
-    const w = await callOn(emptyClient, 'memory_write', { title: 'No Emb Seed', content: 'no embeddings here', folder: 'memory' })
-    const r = await callOn(emptyClient, 'memory_graph', { path: w.path, outgoing: false, incoming: false, byEmbedding: true })
-    assert.ok(Array.isArray(r.byEmbedding), 'byEmbedding is an array even with no embeddings')
-    assert.equal(r.byEmbedding.length, 0, 'no embeddings -> empty byEmbedding, no error')
+    await callOn(c, 'memory_search', { query: 'canvas rendering', limit: 5 })
+    await callOn(c, 'memory_search', { query: 'canvas rendering', limit: 5 })
+    await callOn(c, 'memory_search', { query: 'canvas rendering', limit: 5 })
+    await callOn(c, 'memory_write', { title: 'Usage Probe', content: 'counted by memory_usage', folder: 'memory' })
+    const u = await callOn(c, 'memory_usage', {})
+    assert.equal(typeof u.since, 'string')
+    assert.ok(!Number.isNaN(Date.parse(u.since)), 'since must be ISO')
+    assert.equal(u.byTool.memory_search.calls, 3, 'three memory_search calls counted')
+    assert.equal(u.byTool.memory_write.calls, 1, 'one memory_write call counted')
+    assert.ok(u.byTool.memory_search.totalResults >= 0, 'totalResults is a number')
+    assert.ok(u.totals.calls >= 4, 'totals.calls aggregates all tools')
+    assert.equal(typeof u.totals.avgMs, 'number')
+    assert.equal(typeof u.byTool.memory_search.avgMs, 'number')
   } finally {
-    await emptyClient.close()
-    rmSync(emptyVault, { recursive: true, force: true })
+    await c.close()
+    rmSync(v, { recursive: true, force: true })
   }
 })
 
-test('memory_graph seed carries kind and pinned from the notes table', async () => {
-  const w = await call('memory_write', {
-    title: 'Graph Seed Kind', content: 'seed for kind/pinned echo', folder: 'memory',
-    kind: 'decision', frontmatter: { pinned: true },
-  })
-  const r = await call('memory_graph', { path: w.path, outgoing: false, incoming: false })
-  assert.equal(r.seed.kind, 'decision')
-  assert.equal(r.seed.pinned, 1)
+test('memory_usage counts errors without swallowing the MCP error path', async () => {
+  const { c, v } = await spawnUsageClient()
+  try {
+    // path traversal is rejected -> isError from the tool, but withUsage still records it
+    const res = (await c.callTool({ name: 'memory_get_note', arguments: { path: '../../../etc/passwd' } })) as { isError?: boolean }
+    assert.ok(res.isError, 'escaping the vault must fail')
+    const u = await callOn(c, 'memory_usage', {})
+    assert.ok(u.byTool.memory_get_note.calls >= 1, 'the errored call is still counted')
+    assert.ok(u.byTool.memory_get_note.errors >= 1, 'the error is recorded')
+  } finally {
+    await c.close()
+    rmSync(v, { recursive: true, force: true })
+  }
+})
+
+test('OMEM_USAGE_LOG=off suppresses per-call stderr JSON events', async () => {
+  const { c, v, transport } = await spawnUsageClient({ env: { OMEM_USAGE_LOG: 'off' }, stderr: 'pipe' })
+  let stderrBuf = ''
+  transport.stderr?.on('data', chunk => { stderrBuf += chunk.toString() })
+  try {
+    await callOn(c, 'memory_search', { query: 'canvas rendering', limit: 3 })
+    await callOn(c, 'memory_write', { title: 'Off Probe', content: 'no event on stderr', folder: 'memory' })
+    // give stderr a moment to flush
+    await new Promise(r => setTimeout(r, 300))
+    const lines = stderrBuf.split('\n').filter(Boolean)
+    // the startup banner is allowed; per-call usage JSON events must be absent
+    assert.ok(lines.some(l => /omem: usage log: off/.test(l)), 'startup banner announces off mode')
+    assert.ok(!lines.some(l => /^\{"ts":.*"tool":/.test(l)), 'no per-call usage JSON events when OMEM_USAGE_LOG=off')
+  } finally {
+    await c.close()
+    rmSync(v, { recursive: true, force: true })
+  }
+})
+
+test('OMEM_USAGE_LOG=json (default) emits one structured event per tool call to stderr', async () => {
+  const { c, v, transport } = await spawnUsageClient({ stderr: 'pipe' })
+  let stderrBuf = ''
+  transport.stderr?.on('data', chunk => { stderrBuf += chunk.toString() })
+  try {
+    await callOn(c, 'memory_search', { query: 'canvas rendering', limit: 3 })
+    await new Promise(r => setTimeout(r, 300))
+    const events = stderrBuf.split('\n').filter(Boolean).filter(l => /^\{"ts":.*"tool":/.test(l))
+    assert.ok(events.length >= 1, 'at least one usage JSON event emitted to stderr')
+    const ev = JSON.parse(events[0])
+    assert.equal(ev.tool, 'memory_search')
+    assert.equal(typeof ev.ms, 'number')
+    assert.equal(ev.ok, true)
+    assert.equal(typeof ev.resultCount, 'number')
+    // args scrubbed: query truncated, no sensitive payload leaked
+    assert.equal(typeof ev.args.query, 'string')
+    assert.ok(!('content' in ev.args), 'content must be redacted from args')
+  } finally {
+    await c.close()
+    rmSync(v, { recursive: true, force: true })
+  }
+})
+
+test('memory_usage is advertised as read-only', async () => {
+  const { tools } = await client.listTools()
+  const tool = tools.find(t => t.name === 'memory_usage')
+  assert.ok(tool, 'memory_usage must be listed')
+  assert.equal(tool.annotations?.readOnlyHint, true, 'memory_usage must declare readOnlyHint')
 })

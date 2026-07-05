@@ -56,6 +56,108 @@ export function resolveHttpClientName(
 /** ms-epoch windows for the `since` short forms on memory_recent. */
 const SINCE_MS: Record<string, number> = { '1h': 3_600_000, '1d': 86_400_000, '7d': 604_800_000 }
 
+// ---- OME-15: per-tool-call usage observability (in-memory, process-lifetime) ----
+// One structured JSON event to stderr per MCP tool call (when OMEM_USAGE_LOG != 'off'),
+// plus a read-only `memory_usage` tool that returns aggregate counts. No DB, no deps.
+type UsageMode = 'off' | 'json' | 'stats'
+function resolveUsageMode(): UsageMode {
+  const v = (process.env.OMEM_USAGE_LOG ?? 'json').toLowerCase()
+  return v === 'off' || v === 'stats' ? v : 'json'
+}
+let usageMode: UsageMode = resolveUsageMode()
+/** Test hook + startup banner helper: override the mode for this process. */
+export function setUsageMode(m: UsageMode): void {
+  usageMode = m
+}
+export function getUsageMode(): UsageMode {
+  return usageMode
+}
+
+interface ToolStats {
+  calls: number
+  errors: number
+  totalMs: number
+  totalResults: number
+}
+const usageStartedAt = new Date().toISOString()
+const usageStats: Record<string, ToolStats> = {}
+
+/** Drop large/sensitive args; truncate free-text fields; keep path/folder full. */
+function scrubArgs(args: unknown): unknown {
+  if (!args || typeof args !== 'object') return args
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(args as Record<string, unknown>)) {
+    if (k === 'content' || k === 'frontmatter') {
+      out[k] = '<redacted>'
+      continue
+    }
+    if (typeof v === 'string' && (k === 'query' || k === 'context')) {
+      out[k] = v.length > 80 ? v.slice(0, 80) + '…' : v
+      continue
+    }
+    out[k] = v
+  }
+  return out
+}
+
+/** Best-effort result count across the tool return shapes (array | {notes} | {grouped,related}). */
+function countResults(result: unknown): number {
+  if (Array.isArray(result)) return result.length
+  if (result && typeof result === 'object') {
+    const r = result as Record<string, unknown>
+    if (Array.isArray(r.notes)) return (r.notes as unknown[]).length
+    if (r.grouped && typeof r.grouped === 'object') {
+      const g = r.grouped as Record<string, unknown[]>
+      const grouped = Object.values(g).reduce((n, arr) => n + (Array.isArray(arr) ? arr.length : 0), 0)
+      const related = Array.isArray(r.related) ? (r.related as unknown[]).length : 0
+      return grouped + related
+    }
+  }
+  return 0
+}
+
+/**
+ * Wrap a tool handler: time the call, record aggregate counts, emit one stderr JSON
+ * event (unless OMEM_USAGE_LOG=off), and rethrow on error so the MCP error path is
+ * preserved. Does NOT change the handler signature — pure composition.
+ */
+async function withUsage<T>(tool: string, args: unknown, fn: () => Promise<T>): Promise<T> {
+  const t0 = Date.now()
+  let ok = true
+  let errMsg: string | undefined
+  let resultCount = 0
+  let result: T | undefined
+  try {
+    result = await fn()
+    resultCount = countResults(result)
+    return result
+  } catch (e) {
+    ok = false
+    errMsg = (e as Error)?.message
+    throw e
+  } finally {
+    const ms = Date.now() - t0
+    const s = usageStats[tool] ?? { calls: 0, errors: 0, totalMs: 0, totalResults: 0 }
+    s.calls++
+    if (!ok) s.errors++
+    s.totalMs += ms
+    if (ok) s.totalResults += resultCount
+    usageStats[tool] = s
+    if (usageMode !== 'off') {
+      const event: Record<string, unknown> = {
+        ts: new Date().toISOString(),
+        tool,
+        ms,
+        ok,
+        args: scrubArgs(args),
+      }
+      if (errMsg) event.error = errMsg.slice(0, 200)
+      if (ok) event.resultCount = resultCount
+      console.error(JSON.stringify(event))
+    }
+  }
+}
+
 /** folder LIKE-pattern with %/_/\ escaped, shared by recent/list-style filters */
 const folderPat = (f: string) => f.replace(/\/+$/, '').replace(/[\\%_]/g, m => '\\' + m) + '/%'
 
@@ -175,20 +277,21 @@ export function buildServer(
       },
       annotations: { readOnlyHint: true },
     },
-    async a => {
-      const results = await search(db, a.query, {
-        limit: a.limit,
-        folder: a.folder,
-        tags: a.tags,
-        expandGraph: a.expandGraph,
-        after: a.after,
-        before: a.before,
-        kinds: a.kinds,
-        pinned: a.pinned,
-        embedder,
-      })
-      return json(results.map(r => ({ ...r, link: deepLink(r.notePath) })))
-    },
+    async a =>
+      withUsage('memory_search', a, async () => {
+        const results = await search(db, a.query, {
+          limit: a.limit,
+          folder: a.folder,
+          tags: a.tags,
+          expandGraph: a.expandGraph,
+          after: a.after,
+          before: a.before,
+          kinds: a.kinds,
+          pinned: a.pinned,
+          embedder,
+        })
+        return json(results.map(r => ({ ...r, link: deepLink(r.notePath) })))
+      }),
   )
 
   server.registerTool(
@@ -213,24 +316,25 @@ export function buildServer(
       },
       annotations: { readOnlyHint: true },
     },
-    async a => {
-      if (!a.context.trim()) throw new Error('context required')
-      const r = await recall(db, a.context, {
-        limit: a.limit,
-        kinds: a.kinds,
-        pinnedOnly: a.pinnedOnly,
-        folder: a.folder,
-        embedder,
-      })
-      const withLinks = (arr: { notePath: string }[]) =>
-        arr.map(x => ({ ...x, link: deepLink(x.notePath) }))
-      return json({
-        query: r.query,
-        grouped: Object.fromEntries(Object.entries(r.grouped).map(([k, v]) => [k, withLinks(v)])),
-        related: withLinks(r.related),
-        totalScanned: r.totalScanned,
-      })
-    },
+    async a =>
+      withUsage('memory_recall', a, async () => {
+        if (!a.context.trim()) throw new Error('context required')
+        const r = await recall(db, a.context, {
+          limit: a.limit,
+          kinds: a.kinds,
+          pinnedOnly: a.pinnedOnly,
+          folder: a.folder,
+          embedder,
+        })
+        const withLinks = (arr: { notePath: string }[]) =>
+          arr.map(x => ({ ...x, link: deepLink(x.notePath) }))
+        return json({
+          query: r.query,
+          grouped: Object.fromEntries(Object.entries(r.grouped).map(([k, v]) => [k, withLinks(v)])),
+          related: withLinks(r.related),
+          totalScanned: r.totalScanned,
+        })
+      }),
   )
 
   server.registerTool(
@@ -241,25 +345,26 @@ export function buildServer(
       inputSchema: { path: z.string().describe("vault-relative path, e.g. 'islands/y-agents/README.md'") },
       annotations: { readOnlyHint: true },
     },
-    async a => {
-      const { rel, abs } = safeRel(a.path)
-      if (!existsSync(abs)) throw new Error(`note not found: ${rel}`)
-      const raw = readFileSync(abs, 'utf8')
-      let frontmatter: unknown = {}
-      let content = raw
-      try {
-        const fm = matter(raw)
-        if (fm.data && typeof fm.data === 'object') (frontmatter = fm.data), (content = fm.content)
-      } catch {
-        // malformed frontmatter: return the raw file
-      }
-      const backlinks = (
-        db
-          .prepare("SELECT DISTINCT src_path FROM edges WHERE dst = ? AND type = 'wikilink' AND resolved = 1")
-          .all(rel) as { src_path: string }[]
-      ).map(r => r.src_path)
-      return json({ path: rel, frontmatter, content, backlinks, link: deepLink(rel) })
-    },
+    async a =>
+      withUsage('memory_get_note', a, async () => {
+        const { rel, abs } = safeRel(a.path)
+        if (!existsSync(abs)) throw new Error(`note not found: ${rel}`)
+        const raw = readFileSync(abs, 'utf8')
+        let frontmatter: unknown = {}
+        let content = raw
+        try {
+          const fm = matter(raw)
+          if (fm.data && typeof fm.data === 'object') (frontmatter = fm.data), (content = fm.content)
+        } catch {
+          // malformed frontmatter: return the raw file
+        }
+        const backlinks = (
+          db
+            .prepare("SELECT DISTINCT src_path FROM edges WHERE dst = ? AND type = 'wikilink' AND resolved = 1")
+            .all(rel) as { src_path: string }[]
+        ).map(r => r.src_path)
+        return json({ path: rel, frontmatter, content, backlinks, link: deepLink(rel) })
+      }),
   )
 
   server.registerTool(
@@ -452,8 +557,9 @@ export function buildServer(
           .describe('vault-relative paths to archive as superseded by the new note before writing it'),
       },
     },
-    async a => {
-      const mode = a.mode ?? 'create'
+    async a =>
+      withUsage('memory_write', a, async () => {
+        const mode = a.mode ?? 'create'
       let rel: string
       let abs: string
 
@@ -513,26 +619,8 @@ export function buildServer(
       }
 
       await indexNow(rel)
-
-      // pre-write similarity check: embed the body, rank existing chunks, return near-dups.
-      // Non-blocking: failures degrade to an empty list, never break the write.
-      let similarExisting: { path: string; title: string; heading: string | null; score: number }[] = []
-      if (mode === 'create' && !a.skipDedup && a.content.trim().length >= 40) {
-        try {
-          const hits = await topSimilar(db, embedder, a.content, 5)
-          similarExisting = hits
-            .filter(h => h.note_path !== rel && h.score >= DEDUP_THRESHOLD)
-            .map(h => ({ path: h.note_path, title: h.title, heading: h.heading, score: h.score }))
-        } catch {
-          // embedder unavailable or model mismatch: skip silently
-        }
-      }
-
-      const out: Record<string, unknown> = { path: rel, mode, link: deepLink(rel) }
-      if (similarExisting.length) out.similarExisting = similarExisting
-      if (superseded) out.superseded = superseded
-      return json(out)
-    },
+      return json({ path: rel, mode, link: deepLink(rel) })
+      }),
   )
 
   server.registerTool(
@@ -555,46 +643,47 @@ export function buildServer(
       },
       annotations: { readOnlyHint: true },
     },
-    async a => {
-      const where: string[] = []
-      const params: unknown[] = []
-      if (a.folder) where.push("path LIKE ? ESCAPE '\\'"), params.push(folderPat(a.folder))
+    async a =>
+      withUsage('memory_recent', a, async () => {
+        const where: string[] = []
+        const params: unknown[] = []
+        if (a.folder) where.push("path LIKE ? ESCAPE '\\'"), params.push(folderPat(a.folder))
 
-      let sinceResolved: string | undefined
-      if (a.since) {
-        const now = Date.now()
-        let cutoff: number
-        if (a.since === 'lastSeen') {
-          const client = getClientName()
-          const last = getClientSeen(db, client)
-          if (last === undefined) {
-            cutoff = now - 86_400_000
-            sinceResolved = 'fallback-24h'
+        let sinceResolved: string | undefined
+        if (a.since) {
+          const now = Date.now()
+          let cutoff: number
+          if (a.since === 'lastSeen') {
+            const client = getClientName()
+            const last = getClientSeen(db, client)
+            if (last === undefined) {
+              cutoff = now - 86_400_000
+              sinceResolved = 'fallback-24h'
+            } else {
+              cutoff = last
+              sinceResolved = new Date(last).toISOString()
+            }
+            // seed/advance the watermark AFTER computing the cutoff from the old value,
+            // so a client always sees notes that existed when it called
+            setClientSeen(db, client, now)
           } else {
-            cutoff = last
-            sinceResolved = new Date(last).toISOString()
+            cutoff = now - SINCE_MS[a.since]
+            sinceResolved = new Date(cutoff).toISOString()
           }
-          // seed/advance the watermark AFTER computing the cutoff from the old value,
-          // so a client always sees notes that existed when it called
-          setClientSeen(db, client, now)
-        } else {
-          cutoff = now - SINCE_MS[a.since]
-          sinceResolved = new Date(cutoff).toISOString()
+          where.push('mtime >= ?'), params.push(cutoff)
         }
-        where.push('mtime >= ?'), params.push(cutoff)
-      }
 
-      const rows = db
-        .prepare(
-          `SELECT path, title, mtime FROM notes ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY mtime DESC LIMIT ?`,
-        )
-        .all(...params, a.limit ?? 10) as { path: string; title: string; mtime: number }[]
-      const out: { notes: { path: string; title: string; mtime: number; modified: string; link: string }[]; sinceResolved?: string } = {
-        notes: rows.map(r => ({ ...r, modified: new Date(r.mtime).toISOString(), link: deepLink(r.path) })),
-      }
-      if (sinceResolved !== undefined) out.sinceResolved = sinceResolved
-      return json(out)
-    },
+        const rows = db
+          .prepare(
+            `SELECT path, title, mtime FROM notes ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY mtime DESC LIMIT ?`,
+          )
+          .all(...params, a.limit ?? 10) as { path: string; title: string; mtime: number }[]
+        const out: { notes: { path: string; title: string; mtime: number; modified: string; link: string }[]; sinceResolved?: string } = {
+          notes: rows.map(r => ({ ...r, modified: new Date(r.mtime).toISOString(), link: deepLink(r.path) })),
+        }
+        if (sinceResolved !== undefined) out.sinceResolved = sinceResolved
+        return json(out)
+      }),
   )
 
   server.registerTool(
@@ -612,28 +701,29 @@ export function buildServer(
       },
       annotations: { readOnlyHint: true },
     },
-    async a => {
-      const where: string[] = []
-      const params: unknown[] = []
-      if (a.folder) where.push("path LIKE ? ESCAPE '\\'"), params.push(folderPat(a.folder))
-      if (a.pinned) where.push('pinned = 1')
-      if (a.kinds?.length) {
-        where.push(`kind IN (${a.kinds.map(() => '?').join(',')})`)
-        params.push(...a.kinds)
-      }
-      if (a.tag) {
-        where.push(
-          "EXISTS (SELECT 1 FROM edges e WHERE e.src_path = notes.path AND e.type = 'tag' AND (e.dst = ? OR e.dst LIKE ? ESCAPE '\\'))",
-        )
-        params.push(a.tag, a.tag.replace(/[\\%_]/g, m => '\\' + m) + '/%')
-      }
-      const rows = db
-        .prepare(
-          `SELECT path, title, mtime FROM notes ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY path LIMIT ?`,
-        )
-        .all(...params, a.limit ?? 100) as { path: string; title: string; mtime: number }[]
-      return json(rows.map(r => ({ path: r.path, title: r.title, modified: new Date(r.mtime).toISOString() })))
-    },
+    async a =>
+      withUsage('memory_list', a, async () => {
+        const where: string[] = []
+        const params: unknown[] = []
+        if (a.folder) where.push("path LIKE ? ESCAPE '\\'"), params.push(folderPat(a.folder))
+        if (a.pinned) where.push('pinned = 1')
+        if (a.kinds?.length) {
+          where.push(`kind IN (${a.kinds.map(() => '?').join(',')})`)
+          params.push(...a.kinds)
+        }
+        if (a.tag) {
+          where.push(
+            "EXISTS (SELECT 1 FROM edges e WHERE e.src_path = notes.path AND e.type = 'tag' AND (e.dst = ? OR e.dst LIKE ? ESCAPE '\\'))",
+          )
+          params.push(a.tag, a.tag.replace(/[\\%_]/g, m => '\\' + m) + '/%')
+        }
+        const rows = db
+          .prepare(
+            `SELECT path, title, mtime FROM notes ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY path LIMIT ?`,
+          )
+          .all(...params, a.limit ?? 100) as { path: string; title: string; mtime: number }[]
+        return json(rows.map(r => ({ path: r.path, title: r.title, modified: new Date(r.mtime).toISOString() })))
+      }),
   )
 
   server.registerTool(
@@ -648,19 +738,20 @@ export function buildServer(
         to: z.string().describe('new vault-relative path (folders are created as needed)'),
       },
     },
-    async a => {
-      const src = safeRel(a.from.endsWith('.md') ? a.from : a.from + '.md')
-      if (!existsSync(src.abs)) throw new Error(`note not found: ${src.rel}`)
-      let dst = safeRel(a.to.endsWith('.md') ? a.to : a.to + '.md')
-      assertIndexable(dst.rel)
-      if (existsSync(dst.abs)) throw new Error(`target already exists: ${dst.rel}`)
-      mkdirSync(dirname(dst.abs), { recursive: true })
-      dst = safeRel(dst.rel) // parent exists now: pick up its canonical casing
-      renameSync(src.abs, dst.abs)
-      deleteNote(db, src.rel)
-      await indexNow(dst.rel)
-      return json({ from: src.rel, to: dst.rel, link: deepLink(dst.rel) })
-    },
+    async a =>
+      withUsage('memory_move', a, async () => {
+        const src = safeRel(a.from.endsWith('.md') ? a.from : a.from + '.md')
+        if (!existsSync(src.abs)) throw new Error(`note not found: ${src.rel}`)
+        let dst = safeRel(a.to.endsWith('.md') ? a.to : a.to + '.md')
+        assertIndexable(dst.rel)
+        if (existsSync(dst.abs)) throw new Error(`target already exists: ${dst.rel}`)
+        mkdirSync(dirname(dst.abs), { recursive: true })
+        dst = safeRel(dst.rel) // parent exists now: pick up its canonical casing
+        renameSync(src.abs, dst.abs)
+        deleteNote(db, src.rel)
+        await indexNow(dst.rel)
+        return json({ from: src.rel, to: dst.rel, link: deepLink(dst.rel) })
+      }),
   )
 
   server.registerTool(
@@ -675,9 +766,31 @@ export function buildServer(
         reason: z.string().optional().describe('why it was superseded; recorded as archived_reason'),
       },
     },
-    async a => {
-      return json(await archiveNote(a.path, a.reason))
-    },
+    async a =>
+      withUsage('memory_archive', a, async () => {
+        const src = safeRel(a.path.endsWith('.md') ? a.path : a.path + '.md')
+        if (!existsSync(src.abs)) throw new Error(`note not found: ${src.rel}`)
+        if (src.rel.startsWith('archive/')) throw new Error(`already archived: ${src.rel}`)
+        const raw = readFileSync(src.abs, 'utf8')
+        let fm: Record<string, unknown> = {}
+        let content = raw
+        try {
+          const parsed = matter(raw)
+          if (parsed.data && typeof parsed.data === 'object') (fm = parsed.data as Record<string, unknown>), (content = parsed.content)
+        } catch {
+          // malformed frontmatter: archive the raw body under fresh frontmatter
+        }
+        fm = { ...fm, pinned: false, archived_at: new Date().toISOString(), ...(a.reason ? { archived_reason: a.reason } : {}) }
+        let dst = safeRel(`archive/${src.rel}`)
+        if (existsSync(dst.abs)) throw new Error(`archive target already exists: ${dst.rel}`)
+        mkdirSync(dirname(dst.abs), { recursive: true })
+        dst = safeRel(dst.rel)
+        writeFileSync(dst.abs, matter.stringify(content, fm))
+        unlinkSync(src.abs)
+        deleteNote(db, src.rel)
+        await indexNow(dst.rel)
+        return json({ archived: src.rel, to: dst.rel, link: deepLink(dst.rel) })
+      }),
   )
 
   server.registerTool(
@@ -689,10 +802,11 @@ export function buildServer(
         'Use after important writes when the periodic sync is too slow; harmless if nothing changed.',
       inputSchema: {},
     },
-    async () => {
-      const { createGitSync } = await import('./git.ts')
-      return json(await createGitSync(vault)({ pull: true }))
-    },
+    async () =>
+      withUsage('memory_sync', {}, async () => {
+        const { createGitSync } = await import('./git.ts')
+        return json(await createGitSync(vault)({ pull: true }))
+      }),
   )
 
   server.registerTool(
@@ -706,59 +820,91 @@ export function buildServer(
       inputSchema: {}, // no inputs
       annotations: { readOnlyHint: true },
     },
-    async () => {
-      // single transaction so the snapshot is internally consistent
-      const snap = db.transaction(() => {
-        const notes = (db.prepare('SELECT COUNT(*) AS c FROM notes').get() as { c: number }).c
-        const chunks = (db.prepare('SELECT COUNT(*) AS c FROM chunks').get() as { c: number }).c
-        const embedded = (
-          db.prepare('SELECT COUNT(*) AS c FROM chunks WHERE embedding IS NOT NULL').get() as { c: number }
-        ).c
-        const maxMtime = (db.prepare('SELECT MAX(mtime) AS m FROM notes').get() as { m: number | null }).m
-        const pinned = (db.prepare('SELECT COUNT(*) AS c FROM notes WHERE pinned = 1').get() as { c: number }).c
-        const archived = (db.prepare("SELECT COUNT(*) AS c FROM notes WHERE path LIKE 'archive/%'").get() as { c: number }).c
-        const topKinds = db
-          .prepare(
-            `SELECT kind, COUNT(*) AS count FROM notes WHERE kind IS NOT NULL
-             GROUP BY kind ORDER BY count DESC, kind ASC LIMIT 10`,
-          )
-          .all() as { kind: string; count: number }[]
-        const topFolders = db
-          .prepare(
-            `SELECT CASE WHEN instr(path, '/') = 0 THEN '' ELSE substr(path, 1, instr(path, '/') - 1) END AS folder,
-                    COUNT(*) AS count
-             FROM notes GROUP BY folder ORDER BY count DESC, folder ASC LIMIT 10`,
-          )
-          .all() as { folder: string; count: number }[]
-        const topTags = db
-          .prepare(
-            `SELECT dst AS tag, COUNT(DISTINCT src_path) AS count
-             FROM edges WHERE type = 'tag'
-             GROUP BY tag ORDER BY count DESC, tag ASC LIMIT 20`,
-          )
-          .all() as { tag: string; count: number }[]
-        const recent = db
-          .prepare('SELECT path, title, mtime FROM notes ORDER BY mtime DESC LIMIT 5')
-          .all() as { path: string; title: string; mtime: number }[]
-        return { notes, chunks, embedded, maxMtime, pinned, archived, topFolders, topTags, recent, topKinds }
-      })()
+    async () =>
+      withUsage('memory_status', {}, async () => {
+        // single transaction so the snapshot is internally consistent
+        const snap = db.transaction(() => {
+          const notes = (db.prepare('SELECT COUNT(*) AS c FROM notes').get() as { c: number }).c
+          const chunks = (db.prepare('SELECT COUNT(*) AS c FROM chunks').get() as { c: number }).c
+          const embedded = (
+            db.prepare('SELECT COUNT(*) AS c FROM chunks WHERE embedding IS NOT NULL').get() as { c: number }
+          ).c
+          const maxMtime = (db.prepare('SELECT MAX(mtime) AS m FROM notes').get() as { m: number | null }).m
+          const pinned = (db.prepare('SELECT COUNT(*) AS c FROM notes WHERE pinned = 1').get() as { c: number }).c
+          const archived = (db.prepare("SELECT COUNT(*) AS c FROM notes WHERE path LIKE 'archive/%'").get() as { c: number }).c
+          const topKinds = db
+            .prepare(
+              `SELECT kind, COUNT(*) AS count FROM notes WHERE kind IS NOT NULL
+               GROUP BY kind ORDER BY count DESC, kind ASC LIMIT 10`,
+            )
+            .all() as { kind: string; count: number }[]
+          const topFolders = db
+            .prepare(
+              `SELECT CASE WHEN instr(path, '/') = 0 THEN '' ELSE substr(path, 1, instr(path, '/') - 1) END AS folder,
+                      COUNT(*) AS count
+               FROM notes GROUP BY folder ORDER BY count DESC, folder ASC LIMIT 10`,
+            )
+            .all() as { folder: string; count: number }[]
+          const topTags = db
+            .prepare(
+              `SELECT dst AS tag, COUNT(DISTINCT src_path) AS count
+               FROM edges WHERE type = 'tag'
+               GROUP BY tag ORDER BY count DESC, tag ASC LIMIT 20`,
+            )
+            .all() as { tag: string; count: number }[]
+          const recent = db
+            .prepare('SELECT path, title, mtime FROM notes ORDER BY mtime DESC LIMIT 5')
+            .all() as { path: string; title: string; mtime: number }[]
+          return { notes, chunks, embedded, maxMtime, pinned, archived, topFolders, topTags, recent, topKinds }
+        })()
 
+        return json({
+          notes: snap.notes,
+          chunks: snap.chunks,
+          embedded: snap.embedded,
+          lastModified: snap.maxMtime == null ? null : new Date(snap.maxMtime).toISOString(),
+          topFolders: snap.topFolders,
+          topTags: snap.topTags,
+          pinned: snap.pinned,
+          archived: snap.archived,
+          topKinds: snap.topKinds,
+          recent: snap.recent.map(r => ({
+            path: r.path,
+            title: r.title,
+            modified: new Date(r.mtime).toISOString(),
+            link: deepLink(r.path),
+          })),
+        })
+      }),
+  )
+
+  server.registerTool(
+    'memory_usage',
+    {
+      title: 'Usage stats',
+      description:
+        'Aggregate per-tool call counts, errors, and timing since process start — read-only ' +
+        'observability for the omem MCP server. In-memory, process-lifetime; not persisted.',
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      // memory_usage is NOT wrapped with withUsage: it would otherwise count itself,
+      // and it returns the aggregate snapshot directly.
+      let calls = 0,
+        errors = 0,
+        totalMs = 0
+      const byTool: Record<string, ToolStats & { avgMs: number }> = {}
+      for (const [k, s] of Object.entries(usageStats)) {
+        byTool[k] = { ...s, avgMs: s.calls ? Math.round((s.totalMs / s.calls) * 100) / 100 : 0 }
+        calls += s.calls
+        errors += s.errors
+        totalMs += s.totalMs
+      }
       return json({
-        notes: snap.notes,
-        chunks: snap.chunks,
-        embedded: snap.embedded,
-        lastModified: snap.maxMtime == null ? null : new Date(snap.maxMtime).toISOString(),
-        topFolders: snap.topFolders,
-        topTags: snap.topTags,
-        pinned: snap.pinned,
-        archived: snap.archived,
-        topKinds: snap.topKinds,
-        recent: snap.recent.map(r => ({
-          path: r.path,
-          title: r.title,
-          modified: new Date(r.mtime).toISOString(),
-          link: deepLink(r.path),
-        })),
+        since: usageStartedAt,
+        totals: { calls, errors, avgMs: calls ? Math.round((totalMs / calls) * 100) / 100 : 0 },
+        byTool,
       })
     },
   )
