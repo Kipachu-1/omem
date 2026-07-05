@@ -14,6 +14,7 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 - 92 tests, ~19s with model cached (OME-13 added 3 memory_status tests). OME-14 added 14 kind/pinned tests (8 indexer/search + 6 MCP) → 106 total.
 - 110 tests, ~30s with model cached (OME-12 added per-client watermark: 3 memory_recent since:'lastSeen' tests + 1 resolveHttpClientName unit test). OME-17 added 9 (5 MCP `memory_recall` + 4 search `recall`/`noteMeta`) → 119 total.
 - 127 tests, ~34s with model cached (OME-10 added 8 dedup/supersedes tests incl. partial-failure guard). OME-16 added the `memory_graph` tool + tests → 130 total. OME-15 added 5 `memory_usage`/observability tests (aggregation, error counting, OMEM_USAGE_LOG=off/json stderr) → 132 total. Tool surface is now twelve (added `memory_usage`).
+- **0.8.0** (2026-07-05): cluster close. Captures the full agent-friendly batch — OME-9 (server instructions) through OME-15 (usage log): `memory_status`, `kind`/`pinned` ranking, per-client watermark, `memory_recall`, dedup-on-write + `supersedes`, `memory_graph`, `memory_usage` observability. Dockerfile pin bumped to 0.8.0. `npm publish` is manual (no publish CI) — the repo-vs-npm gap persists until `npm publish` runs; Docker deploys pin an unpublished version until then.
 
 ## Conventions
 - Version pins: `Dockerfile:24` pins the installed npm package version. When `package.json` version bumps, the Dockerfile pin must be bumped to match (or CI/deploy will lag by one release). The npm registry is the source of truth for available versions.
