@@ -11,6 +11,7 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 ## Test
 - `npm test` → `node --test "test/*.test.ts"`. Node's built-in test runner; no jest/vitest.
 - ~~83 tests, ~17s with model cached.~~ (actual: 89 as of OME-9 — 88 pre-existing + 1 instructions test)
+- 92 tests, ~19s with model cached (OME-13 added 3 memory_status tests).
 
 ## Conventions
 - Version pins: `Dockerfile:24` pins the installed npm package version. When `package.json` version bumps, the Dockerfile pin must be bumped to match (or CI/deploy will lag by one release). The npm registry is the source of truth for available versions.
@@ -34,7 +35,7 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 
 ## Architecture
 - **Entry**: `src/cli.ts` (the `omem` command). `applyEnvDefaults()` must run before any other import reads env.
-- **MCP tools**: `src/mcp.ts` — eight tools, registered on a fresh `McpServer` per HTTP request (stateless mode) or one server for stdio.
+- **MCP tools**: `src/mcp.ts` — nine tools, registered on a fresh `McpServer` per HTTP request (stateless mode) or one server for stdio.
 - **Hybrid search fusion**: `src/search.ts` (FTS5 + vector cosine + 1-hop wikilink graph + memory-recency boost, RRF).
 - **Git sync state machine**: `src/git.ts` `createGitSync()` returns a closure with per-vault hygiene (one-shot `.gitignore` + index untracking, stale-lock detection, rebase recovery, conflict-snapshot suppression).
 

@@ -19,6 +19,12 @@ const call = async (name: string, args: Record<string, unknown>) => {
   return JSON.parse(res.content[0].text)
 }
 
+const callOn = async (c: Client, name: string, args: Record<string, unknown>) => {
+  const res = (await c.callTool({ name, arguments: args })) as { content: { type: string; text: string }[]; isError?: boolean }
+  assert.ok(!res.isError, `tool ${name} errored: ${res.content?.[0]?.text}`)
+  return JSON.parse(res.content[0].text)
+}
+
 // right after boot the initial embedding pass may still be running; ranking
 // settles once it completes — retry until it does (keyword hits work throughout)
 const untilSettled = async (fn: () => Promise<boolean>, ms = 20000) => {
@@ -52,11 +58,11 @@ test('server advertises memory-usage instructions', async () => {
   assert.ok(instructions!.length <= 400, `instructions must stay under ~400 chars (got ${instructions!.length})`)
 })
 
-test('exposes exactly the eight memory tools', async () => {
+test('exposes exactly the nine memory tools', async () => {
   const { tools } = await client.listTools()
   assert.deepEqual(
     tools.map(t => t.name).sort(),
-    ['memory_archive', 'memory_get_note', 'memory_list', 'memory_move', 'memory_recent', 'memory_search', 'memory_sync', 'memory_write'],
+    ['memory_archive', 'memory_get_note', 'memory_list', 'memory_move', 'memory_recent', 'memory_search', 'memory_status', 'memory_sync', 'memory_write'],
   )
 })
 
@@ -230,4 +236,69 @@ test('memory_search rejects non-numeric after (zod guard)', async () => {
     arguments: { query: 'canvas', after: 'yesterday' },
   })) as { isError?: boolean }
   assert.ok(res.isError, 'string after must be rejected by the schema')
+})
+
+test('memory_status on an empty vault returns zeroed snapshot', async () => {
+  const emptyVault = mkdtempSync(join(tmpdir(), 'omem-status-empty-'))
+  const emptyClient = new Client({ name: 'omem-empty-test', version: '0.0.0' })
+  await emptyClient.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [join(ROOT, 'src/cli.ts'), 'serve', '--vault', emptyVault, '--poll', '3600'],
+      stderr: 'ignore',
+    }),
+  )
+  try {
+    const s = await callOn(emptyClient, 'memory_status', {})
+    assert.equal(s.notes, 0)
+    assert.equal(s.chunks, 0)
+    assert.equal(s.embedded, 0)
+    assert.equal(s.lastModified, null)
+    assert.equal(s.pinned, 0)
+    assert.equal(s.archived, 0)
+    assert.deepEqual(s.topFolders, [])
+    assert.deepEqual(s.topTags, [])
+    assert.deepEqual(s.recent, [])
+  } finally {
+    await emptyClient.close()
+    rmSync(emptyVault, { recursive: true, force: true })
+  }
+})
+
+test('memory_status on a populated vault reports counts, folders, tags, recent with valid links', async () => {
+  const s = await call('memory_status', {})
+  assert.ok(s.notes > 0, `notes > 0, got ${s.notes}`)
+  assert.ok(s.chunks > 0, `chunks > 0, got ${s.chunks}`)
+  assert.ok(s.embedded <= s.chunks, 'embedded cannot exceed total chunks')
+  assert.equal(typeof s.lastModified, 'string')
+  assert.ok(!Number.isNaN(Date.parse(s.lastModified)), 'lastModified must be ISO')
+  assert.ok(Array.isArray(s.topFolders) && s.topFolders.length > 0, 'topFolders populated')
+  for (const f of s.topFolders) {
+    assert.equal(typeof f.folder, 'string')
+    assert.ok(f.count > 0)
+  }
+  assert.ok(s.topFolders.length <= 10, 'topFolders capped at 10')
+  assert.ok(Array.isArray(s.topTags) && s.topTags.length > 0, 'topTags populated')
+  for (const t of s.topTags) {
+    assert.equal(typeof t.tag, 'string')
+    assert.ok(t.count > 0)
+  }
+  assert.ok(s.topTags.length <= 20, 'topTags capped at 20')
+  assert.ok(Array.isArray(s.recent), 'recent is an array')
+  assert.ok(s.recent.length <= 5, 'recent capped at 5')
+  // mtimes descending
+  const mtimes = s.recent.map((r: { modified: string }) => Date.parse(r.modified))
+  assert.deepEqual(mtimes, [...mtimes].sort((a, b) => b - a), 'recent is newest-first')
+  for (const r of s.recent) {
+    assert.equal(typeof r.path, 'string')
+    assert.equal(typeof r.title, 'string')
+    assert.ok(r.link.startsWith('obsidian://open?vault='))
+  }
+})
+
+test('memory_status is advertised as read-only', async () => {
+  const { tools } = await client.listTools()
+  const tool = tools.find(t => t.name === 'memory_status')
+  assert.ok(tool, 'memory_status must be listed')
+  assert.equal(tool.annotations?.readOnlyHint, true, 'memory_status must declare readOnlyHint')
 })
