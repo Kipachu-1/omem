@@ -61,6 +61,9 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
 
   const json = (v: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(v, null, 2) }] })
 
+  // memory class taxonomy — agents pick; search ranks decision/gotcha/convention higher
+  const kindSchema = z.enum(['decision', 'gotcha', 'convention', 'fact', 'meeting', 'log'])
+
   // index synchronously after a write so the note is searchable before the tool returns
   const indexNow = async (rel: string): Promise<void> => {
     indexFile(db, vault, rel)
@@ -89,6 +92,8 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
         expandGraph: z.boolean().optional().describe('include 1-hop wikilink neighbors of top hits, default true'),
         after: z.number().int().optional().describe('ms epoch; only notes with mtime >= this are eligible'),
         before: z.number().int().optional().describe('ms epoch; only notes with mtime <= this are eligible'),
+        kinds: z.array(kindSchema).optional().describe('restrict to these memory kinds (decision|gotcha|convention|fact|meeting|log)'),
+        pinned: z.boolean().optional().describe('only pinned notes'),
       },
       annotations: { readOnlyHint: true },
     },
@@ -100,6 +105,8 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
         expandGraph: a.expandGraph,
         after: a.after,
         before: a.before,
+        kinds: a.kinds,
+        pinned: a.pinned,
         embedder,
       })
       return json(results.map(r => ({ ...r, link: deepLink(r.notePath) })))
@@ -153,6 +160,7 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
         path: z.string().optional().describe('existing note path, required for overwrite/append'),
         mode: z.enum(['create', 'overwrite', 'append']).optional().describe('default create'),
         frontmatter: z.record(z.unknown()).optional().describe('extra frontmatter fields merged into the note'),
+        kind: kindSchema.optional().describe('memory class: decision|gotcha|convention|fact|meeting|log'),
       },
     },
     async a => {
@@ -191,6 +199,7 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
           title: a.title,
           created: new Date().toISOString(),
           source: 'agent',
+          ...(a.kind ? { kind: a.kind } : {}),
           ...(a.tags?.length ? { tags: a.tags } : {}),
         }
         const related = a.links?.length ? `\n\n## Related\n${a.links.map(l => `- [[${l}]]`).join('\n')}\n` : ''
@@ -236,6 +245,8 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
         folder: z.string().optional().describe("folder prefix, e.g. 'islands/y-agents'"),
         tag: z.string().optional().describe('require this tag (nested tags match by prefix)'),
         limit: z.number().int().min(1).max(500).optional().describe('default 100'),
+        pinned: z.boolean().optional().describe('only pinned notes'),
+        kinds: z.array(kindSchema).optional().describe('restrict to these memory kinds'),
       },
       annotations: { readOnlyHint: true },
     },
@@ -243,6 +254,11 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
       const where: string[] = []
       const params: unknown[] = []
       if (a.folder) where.push("path LIKE ? ESCAPE '\\'"), params.push(folderPat(a.folder))
+      if (a.pinned) where.push('pinned = 1')
+      if (a.kinds?.length) {
+        where.push(`kind IN (${a.kinds.map(() => '?').join(',')})`)
+        params.push(...a.kinds)
+      }
       if (a.tag) {
         where.push(
           "EXISTS (SELECT 1 FROM edges e WHERE e.src_path = notes.path AND e.type = 'tag' AND (e.dst = ? OR e.dst LIKE ? ESCAPE '\\'))",
@@ -344,7 +360,7 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
       title: 'Vault status snapshot',
       description:
         'Cheap one-call orientation: vault size, last modification, top folders, top tags, ' +
-        'pinned/archived counts, and a few most-recent notes. Use on a fresh session to decide ' +
+        'top kinds, pinned/archived counts, and a few most-recent notes. Use on a fresh session to decide ' +
         'whether memory is worth querying, and what to query.',
       inputSchema: {}, // no inputs
       annotations: { readOnlyHint: true },
@@ -358,12 +374,14 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
           db.prepare('SELECT COUNT(*) AS c FROM chunks WHERE embedding IS NOT NULL').get() as { c: number }
         ).c
         const maxMtime = (db.prepare('SELECT MAX(mtime) AS m FROM notes').get() as { m: number | null }).m
-        const pinned = (
-          db.prepare("SELECT COUNT(*) AS c FROM notes WHERE json_extract(frontmatter, '$.pinned') = 1").get() as {
-            c: number
-          }
-        ).c
+        const pinned = (db.prepare('SELECT COUNT(*) AS c FROM notes WHERE pinned = 1').get() as { c: number }).c
         const archived = (db.prepare("SELECT COUNT(*) AS c FROM notes WHERE path LIKE 'archive/%'").get() as { c: number }).c
+        const topKinds = db
+          .prepare(
+            `SELECT kind, COUNT(*) AS count FROM notes WHERE kind IS NOT NULL
+             GROUP BY kind ORDER BY count DESC, kind ASC LIMIT 10`,
+          )
+          .all() as { kind: string; count: number }[]
         const topFolders = db
           .prepare(
             `SELECT CASE WHEN instr(path, '/') = 0 THEN '' ELSE substr(path, 1, instr(path, '/') - 1) END AS folder,
@@ -381,7 +399,7 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
         const recent = db
           .prepare('SELECT path, title, mtime FROM notes ORDER BY mtime DESC LIMIT 5')
           .all() as { path: string; title: string; mtime: number }[]
-        return { notes, chunks, embedded, maxMtime, pinned, archived, topFolders, topTags, recent }
+        return { notes, chunks, embedded, maxMtime, pinned, archived, topFolders, topTags, recent, topKinds }
       })()
 
       return json({
@@ -393,6 +411,7 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
         topTags: snap.topTags,
         pinned: snap.pinned,
         archived: snap.archived,
+        topKinds: snap.topKinds,
         recent: snap.recent.map(r => ({
           path: r.path,
           title: r.title,

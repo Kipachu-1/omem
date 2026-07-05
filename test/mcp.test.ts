@@ -302,3 +302,53 @@ test('memory_status is advertised as read-only', async () => {
   assert.ok(tool, 'memory_status must be listed')
   assert.equal(tool.annotations?.readOnlyHint, true, 'memory_status must declare readOnlyHint')
 })
+
+test('memory_write stamps kind into frontmatter and memory_get_note reads it back', async () => {
+  const w = await call('memory_write', { title: 'Kind Roundtrip', content: 'decided to ship on Friday', kind: 'decision' })
+  const note = await call('memory_get_note', { path: w.path })
+  assert.equal(note.frontmatter.kind, 'decision')
+})
+
+test('memory_write rejects an invalid kind (zod enum guard)', async () => {
+  const res = (await client.callTool({
+    name: 'memory_write',
+    arguments: { title: 'Bad Kind', content: 'x', kind: 'whimsy' },
+  })) as { isError?: boolean }
+  assert.ok(res.isError, 'invalid kind must be rejected by the schema')
+})
+
+test('memory_search kinds filter over MCP returns only matching notes', async () => {
+  await call('memory_write', { title: 'Decision Note', content: 'alpha beta gamma delta zeta', kind: 'decision', folder: 'memory' })
+  await call('memory_write', { title: 'Log Note', content: 'alpha beta gamma delta zeta', kind: 'log', folder: 'memory' })
+  const r = await call('memory_search', { query: 'alpha beta gamma', kinds: ['decision'] })
+  assert.ok(r.length > 0)
+  assert.ok(r.every((x: { notePath: string }) => x.notePath.startsWith('memory/')), 'all results in memory/')
+})
+
+test('memory_search pinned filter over MCP returns only pinned notes', async () => {
+  await call('memory_write', { title: 'Pinned One', content: 'omega sigma tau phi chi psi', frontmatter: { pinned: true }, folder: 'memory' })
+  const r = await call('memory_search', { query: 'omega sigma tau', pinned: true })
+  assert.ok(r.length > 0, 'pinned filter must return the pinned note')
+})
+
+test('memory_list pinned filter over MCP returns only pinned notes', async () => {
+  await call('memory_write', { title: 'Pinned List', content: 'pinnable', frontmatter: { pinned: true }, folder: 'inbox' })
+  await call('memory_write', { title: 'Unpinned List', content: 'pinnable', folder: 'inbox' })
+  const pinned = await call('memory_list', { folder: 'inbox', pinned: true })
+  assert.ok(pinned.every((x: { path: string }) => x.path.startsWith('inbox/')))
+  assert.ok(pinned.some((x: { title: string }) => x.title === 'Pinned List'))
+  assert.ok(!pinned.some((x: { title: string }) => x.title === 'Unpinned List'))
+})
+
+test('memory_status reports topKinds when kind-tagged notes exist', async () => {
+  await call('memory_write', { title: 'Status Decision', content: 'kappa lambda mu', kind: 'decision', folder: 'memory' })
+  const s = await call('memory_status', {})
+  assert.ok(Array.isArray(s.topKinds), 'topKinds is an array')
+  if (s.topKinds.length) {
+    for (const k of s.topKinds) {
+      assert.equal(typeof k.kind, 'string')
+      assert.ok(k.count > 0)
+    }
+    assert.ok(s.topKinds.some((k: { kind: string }) => k.kind === 'decision'), 'decision kind present')
+  }
+})

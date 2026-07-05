@@ -11,7 +11,7 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 ## Test
 - `npm test` → `node --test "test/*.test.ts"`. Node's built-in test runner; no jest/vitest.
 - ~~83 tests, ~17s with model cached.~~ (actual: 89 as of OME-9 — 88 pre-existing + 1 instructions test)
-- 92 tests, ~19s with model cached (OME-13 added 3 memory_status tests).
+- 92 tests, ~19s with model cached (OME-13 added 3 memory_status tests). OME-14 added 14 kind/pinned tests (8 indexer/search + 6 MCP) → 106 total.
 
 ## Conventions
 - Version pins: `Dockerfile:24` pins the installed npm package version. When `package.json` version bumps, the Dockerfile pin must be bumped to match (or CI/deploy will lag by one release). The npm registry is the source of truth for available versions.
@@ -33,11 +33,12 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 - **Embedding model swap**: changing `OMEM_EMBED_MODEL` against an already-indexed vault requires `omem rebuild` — the index records the model in the `meta` table and `embedPending` will refuse to run with a mismatched model. This is by design (a half-embedded index is worse than none).
 - `/healthz` on HTTP serve is unauthenticated by design; auth is opt-in via `OMEM_HTTP_TOKEN`. The serve startup logs a loud warning if the token is unset.
 - **CI disabled** (2026-07-05): GitHub Actions workflow `ci.yml` is `disabled_manually` (billing lock on the Kipachu-1 account). There is NO CI backstop — agents must run `npm run typecheck` + `npm test` locally and confirm green before opening a PR. Re-enable via `gh workflow enable ci` or the GitHub UI once billing is resolved.
+- **kind/pinned columns** (OME-14): `notes.kind TEXT` + `notes.pinned INTEGER NOT NULL DEFAULT 0` are added to `openDb` both in the CREATE TABLE and via idempotent `ALTER TABLE ... ADD COLUMN` (try/catch on "duplicate column name") for existing dbs. `applyNote` stamps them from frontmatter; `fullIndex` backfills. `pinned` frontmatter accepts bool / `"true"` / `1` / `"1"` (coerced in `indexer.ts`). `memory_search`/`memory_list` expose `kinds`/`pinned` filters; ranking multiplies pinned ×1.4 and decision/gotcha/convention ×1.2. `memory_status` reports `topKinds` and reads `pinned` from the column (not json_extract).
 
 ## Architecture
 - **Entry**: `src/cli.ts` (the `omem` command). `applyEnvDefaults()` must run before any other import reads env.
 - **MCP tools**: `src/mcp.ts` — nine tools, registered on a fresh `McpServer` per HTTP request (stateless mode) or one server for stdio.
-- **Hybrid search fusion**: `src/search.ts` (FTS5 + vector cosine + 1-hop wikilink graph + memory-recency boost, RRF).
+- **Hybrid search fusion**: `src/search.ts` (FTS5 + vector cosine + 1-hop wikilink graph + memory-recency boost, RRF; + pinned/kind ranking boost per OME-14).
 - **Git sync state machine**: `src/git.ts` `createGitSync()` returns a closure with per-vault hygiene (one-shot `.gitignore` + index untracking, stale-lock detection, rebase recovery, conflict-snapshot suppression).
 
 ## Commands
