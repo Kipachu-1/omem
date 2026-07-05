@@ -12,7 +12,7 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 - `npm test` → `node --test "test/*.test.ts"`. Node's built-in test runner; no jest/vitest.
 - ~~83 tests, ~17s with model cached.~~ (actual: 89 as of OME-9 — 88 pre-existing + 1 instructions test)
 - 92 tests, ~19s with model cached (OME-13 added 3 memory_status tests). OME-14 added 14 kind/pinned tests (8 indexer/search + 6 MCP) → 106 total.
-- 110 tests, ~30s with model cached (OME-12 added per-client watermark: 3 memory_recent since:'lastSeen' tests + 1 resolveHttpClientName unit test).
+- 110 tests, ~30s with model cached (OME-12 added per-client watermark: 3 memory_recent since:'lastSeen' tests + 1 resolveHttpClientName unit test). OME-17 added 9 (5 MCP `memory_recall` + 4 search `recall`/`noteMeta`) → 119 total. Tool surface is now ten (added `memory_recall`).
 
 ## Conventions
 - Version pins: `Dockerfile:24` pins the installed npm package version. When `package.json` version bumps, the Dockerfile pin must be bumped to match (or CI/deploy will lag by one release). The npm registry is the source of truth for available versions.
@@ -36,10 +36,12 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 - **CI disabled** (2026-07-05): GitHub Actions workflow `ci.yml` is `disabled_manually` (billing lock on the Kipachu-1 account). There is NO CI backstop — agents must run `npm run typecheck` + `npm test` locally and confirm green before opening a PR. Re-enable via `gh workflow enable ci` or the GitHub UI once billing is resolved.
 - **kind/pinned columns** (OME-14): `notes.kind TEXT` + `notes.pinned INTEGER NOT NULL DEFAULT 0` are added to `openDb` both in the CREATE TABLE and via idempotent `ALTER TABLE ... ADD COLUMN` (try/catch on "duplicate column name") for existing dbs. `applyNote` stamps them from frontmatter; `fullIndex` backfills. `pinned` frontmatter accepts bool / `"true"` / `1` / `"1"` (coerced in `indexer.ts`). `memory_search`/`memory_list` expose `kinds`/`pinned` filters; ranking multiplies pinned ×1.4 and decision/gotcha/convention ×1.2. `memory_status` reports `topKinds` and reads `pinned` from the column (not json_extract).
 - **Per-client watermark** (OME-12): `memory_recent since:"lastSeen"` reads/seeds a `client.lastSeen.<name>` meta key. Client name = `X-Omem-Client` header (HTTP) → `sha256(OMEM_HTTP_TOKEN).slice(0,16)` (HTTP) → `OMEM_CLIENT_NAME` env → `stdio:<ppid>:<exe>` (stdio). Watermark is set AFTER the query, so a client always sees notes that existed when it called; the next call with no changes returns an empty list. `memory_search` does NOT touch the watermark (intentionally — recall vs. "what changed"). Two stdio serves on one vault share the SQLite `meta` table, so per-client keys are per-name global, not per-process.
+- **`memory_recall` + `noteMeta` (OME-17)**: `recall()` (`src/search.ts`) is a thin layer over `search()` — it delegates kind/pinned filtering and the pinned ×1.4 / load-bearing-kind ×1.2 boost to `search()` (do NOT re-apply the boost in `recall`), then buckets results by `kind` with per-kind caps (`KIND_CAPS`) and fills `related`. `noteMeta(db, paths)` reads `notes.kind`/`notes.pinned` columns (the OME-14 columns) — not `json_extract`.
+- **INSTRUCTIONS ≤400 chars**: `src/mcp.ts` `INSTRUCTIONS` is asserted ≤400 chars by `test/mcp.test.ts` ("server advertises memory-usage instructions"). When adding a tool reference, trim existing prose to fit — some MCP clients silently trim long instructions.
 
 ## Architecture
 - **Entry**: `src/cli.ts` (the `omem` command). `applyEnvDefaults()` must run before any other import reads env.
-- **MCP tools**: `src/mcp.ts` — nine tools, registered on a fresh `McpServer` per HTTP request (stateless mode) or one server for stdio.
+- **MCP tools**: `src/mcp.ts` — ten tools (added `memory_recall` in OME-17), registered on a fresh `McpServer` per HTTP request (stateless mode) or one server for stdio.
 - **Hybrid search fusion**: `src/search.ts` (FTS5 + vector cosine + 1-hop wikilink graph + memory-recency boost, RRF; + pinned/kind ranking boost per OME-14).
 - **Git sync state machine**: `src/git.ts` `createGitSync()` returns a closure with per-vault hygiene (one-shot `.gitignore` + index untracking, stale-lock detection, rebase recovery, conflict-snapshot suppression).
 
