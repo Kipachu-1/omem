@@ -81,3 +81,14 @@ export function getMeta(db: DB, key: string): string | undefined {
 export function setMeta(db: DB, key: string, value: string): void {
   db.prepare('INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value)
 }
+
+/** Per-client "last seen" watermark, stored as a `client.lastSeen.<name>` meta key (ms epoch). No migration. */
+export function getClientSeen(db: DB, name: string): number | undefined {
+  const v = getMeta(db, `client.lastSeen.${name}`)
+  const n = v ? Number(v) : NaN
+  return Number.isFinite(n) ? n : undefined
+}
+
+export function setClientSeen(db: DB, name: string, ts: number): void {
+  setMeta(db, `client.lastSeen.${name}`, String(Math.floor(ts)))
+}

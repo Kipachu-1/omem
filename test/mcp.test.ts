@@ -169,10 +169,12 @@ test('path traversal is rejected', async () => {
 
 test('memory_recent lists newest first, folder-filtered', async () => {
   const r = await call('memory_recent', { limit: 3, folder: 'memory' })
-  assert.ok(r.length > 0 && r.length <= 3)
-  for (const x of r) assert.ok(x.path.startsWith('memory/'))
-  const times = r.map((x: { mtime: number }) => x.mtime)
+  assert.ok(r.notes.length > 0 && r.notes.length <= 3)
+  for (const x of r.notes) assert.ok(x.path.startsWith('memory/'))
+  const times = r.notes.map((x: { mtime: number }) => x.mtime)
   assert.deepEqual(times, [...times].sort((a, b) => b - a))
+  // no `since` -> no sinceResolved field
+  assert.equal('sinceResolved' in r, false)
 })
 
 test('non-canonical paths resolve to one canonical identity', async () => {
@@ -351,4 +353,100 @@ test('memory_status reports topKinds when kind-tagged notes exist', async () => 
     }
     assert.ok(s.topKinds.some((k: { kind: string }) => k.kind === 'decision'), 'decision kind present')
   }
+})
+
+// ---- OME-12: per-client session watermark for memory_recent since:'lastSeen' ----
+
+/** Spawn a fresh stdio serve on an isolated vault with a pinned OMEM_CLIENT_NAME. */
+const spawnSeenClient = async (clientName: string) => {
+  const v = mkdtempSync(join(tmpdir(), 'omem-seen-'))
+  cpSync(FIXTURE, v, { recursive: true })
+  const c = new Client({ name: `seen-${clientName}`, version: '0.0.0' })
+  await c.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [join(ROOT, 'src/cli.ts'), 'serve', '--vault', v, '--poll', '3600'],
+      env: { ...process.env, OMEM_CLIENT_NAME: clientName },
+      stderr: 'ignore',
+    }),
+  )
+  return { c, v }
+}
+
+test('memory_recent since:"lastSeen": fresh client falls back to 24h and seeds the watermark', async () => {
+  const { c, v } = await spawnSeenClient('client-A')
+  try {
+    // first call: no watermark yet -> fallback 24h, sinceResolved set, watermark seeded
+    const r = await callOn(c, 'memory_recent', { since: 'lastSeen' })
+    assert.equal(r.sinceResolved, 'fallback-24h')
+    assert.ok(Array.isArray(r.notes))
+    assert.ok(r.notes.length > 0, 'fixture notes (mtime ~= now) fall inside the 24h window')
+
+    // second call: no changes since the seed -> empty, watermark advanced to an ISO
+    const r2 = await callOn(c, 'memory_recent', { since: 'lastSeen' })
+    assert.notEqual(r2.sinceResolved, 'fallback-24h')
+    assert.ok(!Number.isNaN(Date.parse(r2.sinceResolved)), 'sinceResolved is now an ISO epoch')
+    assert.equal(r2.notes.length, 0, 'no changes since the seed -> empty list')
+
+    // write a note, then call again -> the new note appears, watermark advances again
+    const w = await callOn(c, 'memory_write', { title: 'Watermark Probe', content: 'new since last seen', folder: 'memory' })
+    const r3 = await callOn(c, 'memory_recent', { since: 'lastSeen' })
+    assert.ok(r3.notes.some((n: { path: string }) => n.path === w.path), 'newly written note must appear as "changed since last seen"')
+
+    // no further changes -> empty once more
+    const r4 = await callOn(c, 'memory_recent', { since: 'lastSeen' })
+    assert.equal(r4.notes.length, 0, 'watermark advanced past the new note -> empty')
+  } finally {
+    await c.close()
+    rmSync(v, { recursive: true, force: true })
+  }
+})
+
+test('memory_recent since:"lastSeen": different clients keep independent watermarks', async () => {
+  // Client A seeds, writes a note, and drains to empty (watermark past the note).
+  const a = await spawnSeenClient('client-A')
+  // Client B on the SAME vault is fresh and must not inherit A's watermark.
+  const bV = a.v
+  const b = new Client({ name: 'seen-client-B', version: '0.0.0' })
+  await b.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [join(ROOT, 'src/cli.ts'), 'serve', '--vault', bV, '--poll', '3600'],
+      env: { ...process.env, OMEM_CLIENT_NAME: 'client-B' },
+      stderr: 'ignore',
+    }),
+  )
+  try {
+    await callOn(a.c, 'memory_recent', { since: 'lastSeen' }) // A seeds (fallback 24h)
+    const w = await callOn(a.c, 'memory_write', { title: 'Shared Probe', content: 'only A should see this as new', folder: 'memory' })
+    await callOn(a.c, 'memory_recent', { since: 'lastSeen' }) // A sees the note, watermark advances
+    const aEmpty = await callOn(a.c, 'memory_recent', { since: 'lastSeen' })
+    assert.equal(aEmpty.notes.length, 0, 'A has drained to empty')
+
+    // B is fresh: fallback 24h, sees the note (and other recent notes), independent of A's watermark
+    const bFirst = await callOn(b, 'memory_recent', { since: 'lastSeen' })
+    assert.equal(bFirst.sinceResolved, 'fallback-24h', 'B is a fresh client — its own watermark, not A\'s')
+    assert.ok(bFirst.notes.some((n: { path: string }) => n.path === w.path), 'B sees the note A wrote via its own fallback window')
+
+    // B drains to empty independently
+    const bSecond = await callOn(b, 'memory_recent', { since: 'lastSeen' })
+    assert.equal(bSecond.notes.length, 0, 'B advanced its own watermark')
+    // A is still empty — B's calls did not move A's watermark
+    const aStill = await callOn(a.c, 'memory_recent', { since: 'lastSeen' })
+    assert.equal(aStill.notes.length, 0, 'B\'s watermark activity must not affect A')
+  } finally {
+    await a.c.close()
+    await b.close()
+    rmSync(a.v, { recursive: true, force: true })
+  }
+})
+
+test('memory_recent since:"1h"/"1d"/"7d" resolve to a rolling window without touching the watermark', async () => {
+  const h = await call('memory_recent', { since: '1h', limit: 100 })
+  const d = await call('memory_recent', { since: '1d', limit: 100 })
+  const w = await call('memory_recent', { since: '7d', limit: 100 })
+  for (const r of [h, d, w]) assert.ok(!Number.isNaN(Date.parse(r.sinceResolved)), 'sinceResolved must be an ISO epoch')
+  // wider windows never exclude notes that narrower ones include
+  assert.ok(w.notes.length >= d.notes.length, '7d ⊇ 1d')
+  assert.ok(d.notes.length >= h.notes.length, '1d ⊇ 1h')
 })

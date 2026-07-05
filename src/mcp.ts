@@ -6,6 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import matter from 'gray-matter'
 import type { DB } from './db.ts'
+import { getClientSeen, setClientSeen } from './db.ts'
 import { indexFile, deleteNote, embedPending, SKIP_DIRS } from './indexer.ts'
 import { search } from './search.ts'
 import type { Embedder } from './embed.ts'
@@ -17,14 +18,52 @@ import type { Embedder } from './embed.ts'
  * Keep under ~400 chars; some clients silently trim long instructions.
  */
 const INSTRUCTIONS =
-  'Shared Obsidian memory vault via omem MCP. Call memory_search FIRST before answering anything ' +
-  'touching prior context (decisions, conventions, people, gotchas). Search before ' +
-  'memory_write to avoid duplicates. memory_get_note for full notes, memory_recent for what ' +
-  'changed, memory_list to browse. Be conservative with writes — prefer append mode. ' +
-  'memory_status for a fresh-session snapshot.'
+  'Shared Obsidian memory vault via omem. memory_search FIRST before answering anything ' +
+  'touching prior context (decisions, conventions, people, gotchas). Search before memory_write ' +
+  'to avoid duplicates. memory_get_note for full notes, memory_recent (since:"lastSeen") for what ' +
+  'changed since last look, memory_list to browse, memory_status for a snapshot. Be conservative — prefer append mode.'
 
-/** Build a fresh McpServer with all four memory tools registered (db/embedder are shared). */
-export function buildServer(db: DB, vault: string, embedder: Embedder): McpServer {
+/**
+ * Stable client identity for a stdio serve process: an explicit env override wins (lets agents
+ * and tests pin a name), otherwise derive from the parent pid + the launched executable basename
+ * so two agents spawned separately stay distinct.
+ */
+export function stdioClientName(): string {
+  return (
+    process.env.OMEM_CLIENT_NAME ||
+    `stdio:${process.ppid}:${basename(process.argv[1] ?? process.execPath)}`
+  )
+}
+
+/**
+ * Resolve a client name for an HTTP request.
+ * Priority: explicit `X-Omem-Client` header > sha256(OMEM_HTTP_TOKEN).slice(0,16) (same token = same client)
+ * > `'default'` (open endpoint, no header).
+ */
+export function resolveHttpClientName(
+  headers: { 'x-omem-client'?: string | string[] | undefined; authorization?: string },
+  token: string | undefined,
+): string {
+  const raw = headers['x-omem-client']
+  const hdr = Array.isArray(raw) ? raw[0] : raw
+  if (hdr) return hdr
+  if (token) return createHash('sha256').update(token).digest('hex').slice(0, 16)
+  return 'default'
+}
+
+/** ms-epoch windows for the `since` short forms on memory_recent. */
+const SINCE_MS: Record<string, number> = { '1h': 3_600_000, '1d': 86_400_000, '7d': 604_800_000 }
+
+/** folder LIKE-pattern with %/_/\ escaped, shared by recent/list-style filters */
+const folderPat = (f: string) => f.replace(/\/+$/, '').replace(/[\\%_]/g, m => '\\' + m) + '/%'
+
+/** Build a fresh McpServer with all memory tools registered (db/embedder are shared). */
+export function buildServer(
+  db: DB,
+  vault: string,
+  embedder: Embedder,
+  getClientName: () => string = stdioClientName,
+): McpServer {
   const vaultAbs = realpathSync.native(resolve(vault))
   const vaultName = basename(vaultAbs)
   const deepLink = (p: string) =>
@@ -215,25 +254,63 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
     'memory_recent',
     {
       title: 'Recently modified notes',
-      description: "Most recently modified vault notes — 'what have we been working on'.",
+      description:
+        "Most recently modified vault notes — 'what have we been working on'. " +
+        'Pass since:"lastSeen" to get only notes modified since THIS client last called memory_recent ' +
+        '(first call from a client falls back to 24h and seeds the watermark). ' +
+        'since:"1h" | "1d" | "7d" resolve to a rolling window with no per-client state. ' +
+        'When since is set, the response carries sinceResolved (ISO epoch, or "fallback-24h" on the first lastSeen call).',
       inputSchema: {
         limit: z.number().int().min(1).max(100).optional().describe('default 10'),
         folder: z.string().optional().describe('restrict to a folder prefix'),
+        since: z
+          .enum(['lastSeen', '1h', '1d', '7d'])
+          .optional()
+          .describe('rolling window; "lastSeen" uses a per-client watermark seeded after each call'),
       },
       annotations: { readOnlyHint: true },
     },
     async a => {
-      const where = a.folder ? "WHERE path LIKE ? ESCAPE '\\'" : ''
-      const params = a.folder ? [a.folder.replace(/\/+$/, '').replace(/[\\%_]/g, m => '\\' + m) + '/%'] : []
+      const where: string[] = []
+      const params: unknown[] = []
+      if (a.folder) where.push("path LIKE ? ESCAPE '\\'"), params.push(folderPat(a.folder))
+
+      let sinceResolved: string | undefined
+      if (a.since) {
+        const now = Date.now()
+        let cutoff: number
+        if (a.since === 'lastSeen') {
+          const client = getClientName()
+          const last = getClientSeen(db, client)
+          if (last === undefined) {
+            cutoff = now - 86_400_000
+            sinceResolved = 'fallback-24h'
+          } else {
+            cutoff = last
+            sinceResolved = new Date(last).toISOString()
+          }
+          // seed/advance the watermark AFTER computing the cutoff from the old value,
+          // so a client always sees notes that existed when it called
+          setClientSeen(db, client, now)
+        } else {
+          cutoff = now - SINCE_MS[a.since]
+          sinceResolved = new Date(cutoff).toISOString()
+        }
+        where.push('mtime >= ?'), params.push(cutoff)
+      }
+
       const rows = db
-        .prepare(`SELECT path, title, mtime FROM notes ${where} ORDER BY mtime DESC LIMIT ?`)
+        .prepare(
+          `SELECT path, title, mtime FROM notes ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY mtime DESC LIMIT ?`,
+        )
         .all(...params, a.limit ?? 10) as { path: string; title: string; mtime: number }[]
-      return json(rows.map(r => ({ ...r, modified: new Date(r.mtime).toISOString(), link: deepLink(r.path) })))
+      const out: { notes: { path: string; title: string; mtime: number; modified: string; link: string }[]; sinceResolved?: string } = {
+        notes: rows.map(r => ({ ...r, modified: new Date(r.mtime).toISOString(), link: deepLink(r.path) })),
+      }
+      if (sinceResolved !== undefined) out.sinceResolved = sinceResolved
+      return json(out)
     },
   )
-
-  // folder LIKE-pattern with %/_/\ escaped, shared by list/recent-style filters
-  const folderPat = (f: string) => f.replace(/\/+$/, '').replace(/[\\%_]/g, m => '\\' + m) + '/%'
 
   server.registerTool(
     'memory_list',
@@ -426,7 +503,8 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
 }
 
 export async function serveMcp(db: DB, vault: string, embedder: Embedder): Promise<void> {
-  await buildServer(db, vault, embedder).connect(new StdioServerTransport())
+  const clientName = stdioClientName()
+  await buildServer(db, vault, embedder, () => clientName).connect(new StdioServerTransport())
   console.error(`omem mcp server on stdio — vault: ${basename(realpathSync.native(resolve(vault)))}`)
 
   // the SDK transport doesn't watch for stdin EOF; without this, a crashed/closed
@@ -462,7 +540,8 @@ export async function serveHttp(db: DB, vault: string, embedder: Embedder, port:
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
     res.on('close', () => void transport.close())
     try {
-      await buildServer(db, vault, embedder).connect(transport)
+      const clientName = resolveHttpClientName(req.headers, token)
+      await buildServer(db, vault, embedder, () => clientName).connect(transport)
       await transport.handleRequest(req, res)
     } catch (e) {
       console.error('mcp http error:', e)
