@@ -13,8 +13,7 @@ import type { Embedder } from './embed.ts'
 
 /**
  * Server-level instructions injected into the agent's system prompt by MCP clients.
- * Accurate to the current 9-tool surface — sibling issues (OME-10/14) append
- * lines for `supersedes` and `kind` as those features land.
+ * Accurate to the current 11-tool surface — sibling issues append lines here as new tools land.
  * Keep under ~400 chars; some clients silently trim long instructions.
  */
 const INSTRUCTIONS =

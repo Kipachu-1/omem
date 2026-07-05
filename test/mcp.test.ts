@@ -623,6 +623,29 @@ test('memory_graph full neighborhood dedups across lists and caps on limit', asy
   assert.equal(new Set(allPaths).size, allPaths.length, 'no path listed twice across outgoing+incoming')
 })
 
+test('memory_graph byEmbedding returns [] without error on a vault with no embeddings', async () => {
+  // empty vault has no notes → no chunks → no embeddings; byEmbedding must degrade to []
+  const emptyVault = mkdtempSync(join(tmpdir(), 'omem-graph-noemb-'))
+  const emptyClient = new Client({ name: 'omem-graph-noemb', version: '0.0.0' })
+  await emptyClient.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [join(ROOT, 'src/cli.ts'), 'serve', '--vault', emptyVault, '--poll', '3600'],
+      stderr: 'ignore',
+    }),
+  )
+  try {
+    // write a note so the seed exists, but embeddings haven't run (or vault has none yet)
+    const w = await callOn(emptyClient, 'memory_write', { title: 'No Emb Seed', content: 'no embeddings here', folder: 'memory' })
+    const r = await callOn(emptyClient, 'memory_graph', { path: w.path, outgoing: false, incoming: false, byEmbedding: true })
+    assert.ok(Array.isArray(r.byEmbedding), 'byEmbedding is an array even with no embeddings')
+    assert.equal(r.byEmbedding.length, 0, 'no embeddings -> empty byEmbedding, no error')
+  } finally {
+    await emptyClient.close()
+    rmSync(emptyVault, { recursive: true, force: true })
+  }
+})
+
 test('memory_graph seed carries kind and pinned from the notes table', async () => {
   const w = await call('memory_write', {
     title: 'Graph Seed Kind', content: 'seed for kind/pinned echo', folder: 'memory',

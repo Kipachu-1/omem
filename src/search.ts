@@ -333,6 +333,8 @@ export async function topSimilarNotes(
   } catch {
     return [] // model unavailable: no embedding neighbors, not an error
   }
+  // ponytail: full scan per call, ~20ms at 30k chunks; same shape as search()'s vector leg —
+  // cache the matrix in memory if this ever serves at scale
   const rows = db
     .prepare(
       `SELECT ch.note_path AS path, n.title AS title, ch.embedding AS embedding
