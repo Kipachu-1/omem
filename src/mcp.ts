@@ -74,6 +74,8 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
         folder: z.string().optional().describe("restrict to a folder prefix, e.g. 'islands/y-agents'"),
         tags: z.array(z.string()).optional().describe('require all of these tags (nested tags match by prefix)'),
         expandGraph: z.boolean().optional().describe('include 1-hop wikilink neighbors of top hits, default true'),
+        after: z.number().int().optional().describe('ms epoch; only notes with mtime >= this are eligible'),
+        before: z.number().int().optional().describe('ms epoch; only notes with mtime <= this are eligible'),
       },
       annotations: { readOnlyHint: true },
     },
@@ -83,6 +85,8 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
         folder: a.folder,
         tags: a.tags,
         expandGraph: a.expandGraph,
+        after: a.after,
+        before: a.before,
         embedder,
       })
       return json(results.map(r => ({ ...r, link: deepLink(r.notePath) })))
