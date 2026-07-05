@@ -11,6 +11,9 @@ import { indexFile, deleteNote, embedPending, SKIP_DIRS } from './indexer.ts'
 import { search, recall } from './search.ts'
 import type { Embedder } from './embed.ts'
 
+/** cosine similarity floor for pre-write dedup suggestions (tune as the vault grows) */
+const DEDUP_THRESHOLD = 0.78
+
 /**
  * Server-level instructions injected into the agent's system prompt by MCP clients.
  * Accurate to the current 9-tool surface — sibling issues (OME-10/14) append
@@ -111,6 +114,43 @@ export function buildServer(
     } catch {
       // keyword search works immediately; embeddings self-heal on the next pass
     }
+  }
+
+  // shared archive logic used by memory_archive AND memory_write's `supersedes` path.
+  // Sets pinned:false, stamps archived_at + reason, moves the note to archive/<orig>,
+  // re-indexes. Returns the new archive path + deep link.
+  const archiveNote = async (
+    relPath: string,
+    reason?: string,
+  ): Promise<{ archived: string; to: string; link: string }> => {
+    const src = safeRel(relPath.endsWith('.md') ? relPath : relPath + '.md')
+    if (!existsSync(src.abs)) throw new Error(`note not found: ${src.rel}`)
+    if (src.rel.startsWith('archive/')) throw new Error(`already archived: ${src.rel}`)
+    const raw = readFileSync(src.abs, 'utf8')
+    let fm: Record<string, unknown> = {}
+    let content = raw
+    try {
+      const parsed = matter(raw)
+      if (parsed.data && typeof parsed.data === 'object')
+        (fm = parsed.data as Record<string, unknown>), (content = parsed.content)
+    } catch {
+      // malformed frontmatter: archive the raw body under fresh frontmatter
+    }
+    fm = {
+      ...fm,
+      pinned: false,
+      archived_at: new Date().toISOString(),
+      ...(reason ? { archived_reason: reason } : {}),
+    }
+    let dst = safeRel(`archive/${src.rel}`)
+    if (existsSync(dst.abs)) throw new Error(`archive target already exists: ${dst.rel}`)
+    mkdirSync(dirname(dst.abs), { recursive: true })
+    dst = safeRel(dst.rel)
+    writeFileSync(dst.abs, matter.stringify(content, fm))
+    unlinkSync(src.abs)
+    deleteNote(db, src.rel)
+    await indexNow(dst.rel)
+    return { archived: src.rel, to: dst.rel, link: deepLink(dst.rel) }
   }
 
   const server = new McpServer({ name: 'omem', version: '0.1.0' }, { instructions: INSTRUCTIONS })
@@ -231,7 +271,11 @@ export function buildServer(
         'Persist a memory as a markdown note in the vault. Default: creates memory/YYYY-MM-DD-<slug>.md. ' +
         'To update an existing note pass its path with mode "overwrite" (replace) or "append" (add to the end). ' +
         'Link related notes via `links` — they become [[wikilinks]] and graph edges. ' +
-        'Extra frontmatter fields (island, pinned, confidence, ...) can be set via `frontmatter`.',
+        'Extra frontmatter fields (island, pinned, confidence, ...) can be set via `frontmatter`. ' +
+        'On create, a pre-write similarity check returns up to 5 near-duplicate existing notes under `similarExisting` ' +
+        '(score >= 0.78) so the caller can supersede them instead of writing a dup. Pass `skipDedup: true` to bypass ' +
+        'this check (faster, useful for bulk imports). Pass `supersedes` to archive a list of old note paths as ' +
+        'superseded by the new note in the same call.',
       inputSchema: {
         title: z.string(),
         content: z.string().describe('markdown body of the memory'),
@@ -242,6 +286,14 @@ export function buildServer(
         mode: z.enum(['create', 'overwrite', 'append']).optional().describe('default create'),
         frontmatter: z.record(z.unknown()).optional().describe('extra frontmatter fields merged into the note'),
         kind: kindSchema.optional().describe('memory class: decision|gotcha|convention|fact|meeting|log'),
+        skipDedup: z
+          .boolean()
+          .optional()
+          .describe('set to true to bypass the pre-write similarity check (faster, useful for bulk imports)'),
+        supersedes: z
+          .array(z.string())
+          .optional()
+          .describe('vault-relative paths to archive as superseded by the new note before writing it'),
       },
     },
     async a => {
@@ -271,6 +323,17 @@ export function buildServer(
         if (!existsSync(abs)) throw new Error(`note not found: ${rel}`)
       }
 
+      // `supersedes`: archive each old note as superseded by the new path BEFORE writing.
+      // Only valid on create (the new note is the successor); silently ignored on overwrite/append.
+      let superseded: { archived: string; to: string; reason?: string }[] | undefined
+      if (mode === 'create' && a.supersedes?.length) {
+        superseded = []
+        for (const old of a.supersedes) {
+          const r = await archiveNote(old, `superseded by ${rel}`)
+          superseded.push({ archived: r.archived, to: r.to, reason: `superseded by ${rel}` })
+        }
+      }
+
       if (mode === 'append') {
         appendFileSync(abs, `\n\n${a.content.trim()}\n`)
       } else {
@@ -288,7 +351,26 @@ export function buildServer(
       }
 
       await indexNow(rel)
-      return json({ path: rel, mode, link: deepLink(rel) })
+
+      // pre-write similarity check: embed the body, rank existing chunks, return near-dups.
+      // Non-blocking: failures degrade to an empty list, never break the write.
+      let similarExisting: { path: string; title: string; heading: string | null; score: number }[] = []
+      if (mode === 'create' && !a.skipDedup && a.content.trim().length >= 40) {
+        try {
+          const { topSimilar } = await import('./search.ts')
+          const hits = await topSimilar(db, embedder, a.content, 5)
+          similarExisting = hits
+            .filter(h => h.note_path !== rel && h.score >= DEDUP_THRESHOLD)
+            .map(h => ({ path: h.note_path, title: h.title, heading: h.heading, score: h.score }))
+        } catch {
+          // embedder unavailable or model mismatch: skip silently
+        }
+      }
+
+      const out: Record<string, unknown> = { path: rel, mode, link: deepLink(rel) }
+      if (similarExisting.length) out.similarExisting = similarExisting
+      if (superseded) out.superseded = superseded
+      return json(out)
     },
   )
 
@@ -433,28 +515,7 @@ export function buildServer(
       },
     },
     async a => {
-      const src = safeRel(a.path.endsWith('.md') ? a.path : a.path + '.md')
-      if (!existsSync(src.abs)) throw new Error(`note not found: ${src.rel}`)
-      if (src.rel.startsWith('archive/')) throw new Error(`already archived: ${src.rel}`)
-      const raw = readFileSync(src.abs, 'utf8')
-      let fm: Record<string, unknown> = {}
-      let content = raw
-      try {
-        const parsed = matter(raw)
-        if (parsed.data && typeof parsed.data === 'object') (fm = parsed.data as Record<string, unknown>), (content = parsed.content)
-      } catch {
-        // malformed frontmatter: archive the raw body under fresh frontmatter
-      }
-      fm = { ...fm, pinned: false, archived_at: new Date().toISOString(), ...(a.reason ? { archived_reason: a.reason } : {}) }
-      let dst = safeRel(`archive/${src.rel}`)
-      if (existsSync(dst.abs)) throw new Error(`archive target already exists: ${dst.rel}`)
-      mkdirSync(dirname(dst.abs), { recursive: true })
-      dst = safeRel(dst.rel)
-      writeFileSync(dst.abs, matter.stringify(content, fm))
-      unlinkSync(src.abs)
-      deleteNote(db, src.rel)
-      await indexNow(dst.rel)
-      return json({ archived: src.rel, to: dst.rel, link: deepLink(dst.rel) })
+      return json(await archiveNote(a.path, a.reason))
     },
   )
 
