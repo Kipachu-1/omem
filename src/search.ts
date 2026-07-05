@@ -311,6 +311,47 @@ function chunkInfo(db: DB, ids: number[]): Map<number, ChunkRow> {
   return new Map(rows.map(r => [r.id, r]))
 }
 
+/**
+ * Note-level top-k by embedding cosine — used by `memory_graph`'s `byEmbedding` leg.
+ * Embeds `text` as a query, scans every embedded chunk, and keeps the best score
+ * per note. Returns `[]` when the embedder is unavailable or the recorded model
+ * doesn't match (no error — `memory_graph` treats it as "no embedding neighbors").
+ * Not shared with `search()`'s vector leg: that one ranks chunks (RRF fusion),
+ * this one collapses to note-level best, so the two have genuinely different shapes.
+ */
+export async function topSimilarNotes(
+  db: DB,
+  embedder: Embedder,
+  text: string,
+  k: number,
+): Promise<{ path: string; title: string; score: number }[]> {
+  const recorded = getMeta(db, 'embed_model')
+  if (recorded && recorded !== embedder.model) return []
+  let queryVec: Float32Array
+  try {
+    queryVec = (await embedder.embed([text], 'query'))[0]
+  } catch {
+    return [] // model unavailable: no embedding neighbors, not an error
+  }
+  const rows = db
+    .prepare(
+      `SELECT ch.note_path AS path, n.title AS title, ch.embedding AS embedding
+       FROM chunks ch JOIN notes n ON n.path = ch.note_path
+       WHERE ch.embedding IS NOT NULL`,
+    )
+    .all() as { path: string; title: string; embedding: Buffer }[]
+  const best = new Map<string, { title: string; score: number }>()
+  for (const r of rows) {
+    const s = dot(queryVec, bufToVec(r.embedding))
+    const cur = best.get(r.path)
+    if (!cur || s > cur.score) best.set(r.path, { title: r.title, score: s })
+  }
+  return [...best.entries()]
+    .sort((a, b) => b[1].score - a[1].score)
+    .slice(0, k)
+    .map(([path, v]) => ({ path, title: v.title, score: v.score }))
+}
+
 /** Best chunk of a note for the query: max cosine when we have a query vector, else the first chunk. */
 function bestChunk(db: DB, notePath: string, queryVec: Float32Array | null): number | null {
   const rows = db
