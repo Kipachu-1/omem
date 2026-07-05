@@ -357,8 +357,8 @@ export async function topSimilar(
   }
   if (!queryVec) return []
   const rows = db
-    .prepare('SELECT id, note_path, heading, embedding FROM chunks WHERE embedding IS NOT NULL')
-    .all() as { id: number; note_path: string; heading: string | null; embedding: Buffer }[]
+    .prepare('SELECT note_path, heading, embedding FROM chunks WHERE embedding IS NOT NULL')
+    .all() as { note_path: string; heading: string | null; embedding: Buffer }[]
   if (!rows.length) return []
   const best = new Map<string, { score: number; heading: string | null }>()
   const titles = new Map<string, string>()

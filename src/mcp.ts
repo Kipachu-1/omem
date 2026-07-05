@@ -8,7 +8,7 @@ import matter from 'gray-matter'
 import type { DB } from './db.ts'
 import { getClientSeen, setClientSeen } from './db.ts'
 import { indexFile, deleteNote, embedPending, SKIP_DIRS } from './indexer.ts'
-import { search, recall } from './search.ts'
+import { search, recall, topSimilar } from './search.ts'
 import type { Embedder } from './embed.ts'
 
 /** cosine similarity floor for pre-write dedup suggestions (tune as the vault grows) */
@@ -325,8 +325,14 @@ export function buildServer(
 
       // `supersedes`: archive each old note as superseded by the new path BEFORE writing.
       // Only valid on create (the new note is the successor); silently ignored on overwrite/append.
+      // Pre-validate ALL paths first so a mid-loop failure can't leave some notes archived
+      // but the new note never written (phantom successor reference).
       let superseded: { archived: string; to: string; reason?: string }[] | undefined
       if (mode === 'create' && a.supersedes?.length) {
+        for (const old of a.supersedes) {
+          const chk = safeRel(old.endsWith('.md') ? old : old + '.md')
+          if (!existsSync(chk.abs)) throw new Error(`supersedes target not found: ${chk.rel}`)
+        }
         superseded = []
         for (const old of a.supersedes) {
           const r = await archiveNote(old, `superseded by ${rel}`)
@@ -357,7 +363,6 @@ export function buildServer(
       let similarExisting: { path: string; title: string; heading: string | null; score: number }[] = []
       if (mode === 'create' && !a.skipDedup && a.content.trim().length >= 40) {
         try {
-          const { topSimilar } = await import('./search.ts')
           const hits = await topSimilar(db, embedder, a.content, 5)
           similarExisting = hits
             .filter(h => h.note_path !== rel && h.score >= DEDUP_THRESHOLD)
