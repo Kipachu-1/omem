@@ -17,7 +17,10 @@ let vault: string
 // child env with a controlled config home and NO repo .env / inherited omem vars
 const childEnv = (extra: Record<string, string> = {}): NodeJS.ProcessEnv => {
   const env: NodeJS.ProcessEnv = { ...process.env, XDG_CONFIG_HOME: cfgHome, OMEM_ENV_FILE: '/nonexistent' }
-  for (const k of Object.keys(env)) if (k.startsWith('OMEM_') && k !== 'OMEM_ENV_FILE') delete env[k]
+  // scrub omem + git-token aliases: inherited GITHUB_TOKEN/GH_TOKEN would defeat the
+  // alias guard under test (and every GitHub Actions runner carries GITHUB_TOKEN)
+  for (const k of Object.keys(env))
+    if ((k.startsWith('OMEM_') && k !== 'OMEM_ENV_FILE') || k === 'GITHUB_TOKEN' || k === 'GH_TOKEN') delete env[k]
   return { ...env, ...extra }
 }
 
