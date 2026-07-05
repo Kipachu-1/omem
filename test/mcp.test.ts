@@ -305,6 +305,106 @@ test('memory_status is advertised as read-only', async () => {
   assert.equal(tool.annotations?.readOnlyHint, true, 'memory_status must declare readOnlyHint')
 })
 
+// ---- OME-10: dedup-on-write: supersedes + similarExisting ----
+
+test('memory_write supersedes archives old notes as superseded by the new path', async () => {
+  // create a note to supersede
+  const old = await call('memory_write', { title: 'Old Decision', content: 'We use spaces for indentation everywhere.', folder: 'memory' })
+  // write a new note that supersedes the old one
+  const next = await call('memory_write', {
+    title: 'Tabs Decision',
+    content: 'We now use tabs for indentation across all files for accessibility.',
+    folder: 'memory',
+    supersedes: [old.path],
+  })
+  // old note moved to archive/, archived_reason references the new path
+  assert.ok(next.superseded, 'superseded list must be present')
+  assert.equal(next.superseded[0].archived, old.path)
+  assert.ok(!existsSync(join(vault, old.path)), 'old note must be removed from original location')
+  const archPath = `archive/${old.path}`
+  assert.ok(existsSync(join(vault, archPath)), 'old note must exist under archive/')
+  const raw = readFileSync(join(vault, archPath), 'utf8')
+  assert.match(raw, /archived_reason: superseded by /)
+  assert.match(raw, new RegExp(`superseded by ${next.path.replace(/\//g, '/')}`))
+  // new note exists
+  assert.ok(existsSync(join(vault, next.path)), 'new note must exist')
+})
+
+test('memory_write supersedes pre-validates all paths: bad path aborts before archiving any', async () => {
+  // create a note that would be superseded
+  const old = await call('memory_write', { title: 'Prevalidate Old', content: 'old decision content here', folder: 'memory' })
+  // attempt to supersede with a nonexistent path mixed in
+  const res = (await client.callTool({
+    name: 'memory_write',
+    arguments: {
+      title: 'Prevalidate New',
+      content: 'new decision content here that is long enough for dedup check',
+      folder: 'memory',
+      supersedes: [old.path, 'memory/does-not-exist.md'],
+    },
+  })) as { isError?: boolean; content: { type: string; text: string }[] }
+  assert.ok(res.isError, 'bad supersedes path must error before archiving anything')
+  // the valid old note must NOT be archived — pre-validation prevents partial failure
+  assert.ok(existsSync(join(vault, old.path)), 'valid old note must remain (no partial archive)')
+  assert.ok(!existsSync(join(vault, `archive/${old.path}`)), 'no phantom archive from partial failure')
+})
+
+test('memory_write skipDedup:true omits similarExisting', async () => {
+  const w = await call('memory_write', {
+    title: 'Canvas Renderer Dup',
+    content: 'Canvas rendering performance degrades when many layers are visible. Batching draw calls fixed frame drops on large boards.',
+    folder: 'memory',
+    skipDedup: true,
+  })
+  assert.equal(w.similarExisting, undefined, 'skipDedup must suppress similarExisting')
+})
+
+test('memory_write similarExisting surfaces a near-duplicate existing note', async () => {
+  // wait for embeddings to settle on the fixture vault before probing
+  await untilSettled(async () => {
+    const r = await call('memory_search', { query: 'canvas rendering performance', limit: 5 })
+    return r[0]?.notePath === 'projects/canvas.md'
+  })
+  const w = await call('memory_write', {
+    title: 'Canvas Renderer Near Dup',
+    content: 'Canvas rendering performance degrades when many layers are visible. Batching draw calls fixed the frame drops on large boards. The dirty-rect scheduler helps.',
+    folder: 'memory',
+  })
+  // similarExisting should be present and include projects/canvas.md
+  assert.ok(Array.isArray(w.similarExisting), 'similarExisting must be an array when near-dups exist')
+  const hit = w.similarExisting.find((s: { path: string }) => s.path === 'projects/canvas.md')
+  assert.ok(hit, 'projects/canvas.md should appear as a near-duplicate')
+  assert.ok(hit.score >= 0.78, `expected score >= 0.78, got ${hit.score}`)
+})
+
+test('memory_write on a vault with no embeddings returns similarExisting empty without error', async () => {
+  // fresh empty vault: no chunks, no embeddings — write should still succeed
+  const emptyVault = mkdtempSync(join(tmpdir(), 'omem-dedup-empty-'))
+  const emptyClient = new Client({ name: 'omem-dedup-empty', version: '0.0.0' })
+  await emptyClient.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [join(ROOT, 'src/cli.ts'), 'serve', '--vault', emptyVault, '--poll', '3600'],
+      stderr: 'ignore',
+    }),
+  )
+  try {
+    const w = await callOn(emptyClient, 'memory_write', {
+      title: 'No Embeddings Here',
+      content: 'This is a note written into a vault that has no embeddings computed yet, long enough to trigger dedup.',
+      folder: 'memory',
+    })
+    assert.ok(w.path, 'note must be created')
+    // similarExisting either absent or empty — never an error
+    if (w.similarExisting !== undefined) assert.deepEqual(w.similarExisting, [], 'no embeddings -> empty similarExisting')
+  } finally {
+    await emptyClient.close()
+    rmSync(emptyVault, { recursive: true, force: true })
+  }
+})
+
+// ---- OME-14: kind enum + pinned filter ----
+
 test('memory_write stamps kind into frontmatter and memory_get_note reads it back', async () => {
   const w = await call('memory_write', { title: 'Kind Roundtrip', content: 'decided to ship on Friday', kind: 'decision' })
   const note = await call('memory_get_note', { path: w.path })
@@ -450,6 +550,8 @@ test('memory_recent since:"1h"/"1d"/"7d" resolve to a rolling window without tou
   assert.ok(w.notes.length >= d.notes.length, '7d ⊇ 1d')
   assert.ok(d.notes.length >= h.notes.length, '1d ⊇ 1h')
 })
+
+// ---- OME-17: memory_recall ----
 
 test('memory_recall groups results by kind, boosts pinned decisions above logs', async () => {
   const KINDS = ['decision', 'gotcha', 'convention', 'fact', 'meeting', 'log'] as const

@@ -311,49 +311,6 @@ function chunkInfo(db: DB, ids: number[]): Map<number, ChunkRow> {
   return new Map(rows.map(r => [r.id, r]))
 }
 
-/**
- * Note-level top-k by embedding cosine — used by `memory_graph`'s `byEmbedding` leg.
- * Embeds `text` as a query, scans every embedded chunk, and keeps the best score
- * per note. Returns `[]` when the embedder is unavailable or the recorded model
- * doesn't match (no error — `memory_graph` treats it as "no embedding neighbors").
- * Not shared with `search()`'s vector leg: that one ranks chunks (RRF fusion),
- * this one collapses to note-level best, so the two have genuinely different shapes.
- */
-export async function topSimilarNotes(
-  db: DB,
-  embedder: Embedder,
-  text: string,
-  k: number,
-): Promise<{ path: string; title: string; score: number }[]> {
-  const recorded = getMeta(db, 'embed_model')
-  if (recorded && recorded !== embedder.model) return []
-  let queryVec: Float32Array
-  try {
-    queryVec = (await embedder.embed([text], 'query'))[0]
-  } catch {
-    return [] // model unavailable: no embedding neighbors, not an error
-  }
-  // ponytail: full scan per call, ~20ms at 30k chunks; same shape as search()'s vector leg —
-  // cache the matrix in memory if this ever serves at scale
-  const rows = db
-    .prepare(
-      `SELECT ch.note_path AS path, n.title AS title, ch.embedding AS embedding
-       FROM chunks ch JOIN notes n ON n.path = ch.note_path
-       WHERE ch.embedding IS NOT NULL`,
-    )
-    .all() as { path: string; title: string; embedding: Buffer }[]
-  const best = new Map<string, { title: string; score: number }>()
-  for (const r of rows) {
-    const s = dot(queryVec, bufToVec(r.embedding))
-    const cur = best.get(r.path)
-    if (!cur || s > cur.score) best.set(r.path, { title: r.title, score: s })
-  }
-  return [...best.entries()]
-    .sort((a, b) => b[1].score - a[1].score)
-    .slice(0, k)
-    .map(([path, v]) => ({ path, title: v.title, score: v.score }))
-}
-
 /** Best chunk of a note for the query: max cosine when we have a query vector, else the first chunk. */
 function bestChunk(db: DB, notePath: string, queryVec: Float32Array | null): number | null {
   const rows = db
@@ -369,4 +326,59 @@ function bestChunk(db: DB, notePath: string, queryVec: Float32Array | null): num
     if (s > bestSim) (bestSim = s), (best = r.id)
   }
   return best
+}
+
+export interface SimilarNote {
+  note_path: string
+  title: string
+  heading: string | null
+  score: number
+}
+
+/**
+ * Pre-write similarity check: embed `text`, scan all embedded chunks, group by
+ * note_path keeping the best score, return the top `k` as similar-existing notes.
+ * Pure (no MCP types) so it is unit-testable in isolation. Caller wraps in try/catch
+ * so embedder failure degrades to "no suggestions" rather than a hard error.
+ */
+export async function topSimilar(
+  db: DB,
+  embedder: Embedder,
+  text: string,
+  k = 5,
+): Promise<SimilarNote[]> {
+  const recorded = getMeta(db, 'embed_model')
+  if (recorded && recorded !== embedder.model) return []
+  let queryVec: Float32Array | null = null
+  try {
+    queryVec = (await embedder.embed([text], 'query'))[0]
+  } catch {
+    return []
+  }
+  if (!queryVec) return []
+  const rows = db
+    .prepare('SELECT note_path, heading, embedding FROM chunks WHERE embedding IS NOT NULL')
+    .all() as { note_path: string; heading: string | null; embedding: Buffer }[]
+  if (!rows.length) return []
+  const best = new Map<string, { score: number; heading: string | null }>()
+  const titles = new Map<string, string>()
+  for (const r of rows) {
+    const score = dot(queryVec, bufToVec(r.embedding))
+    const prev = best.get(r.note_path)
+    if (!prev || score > prev.score) {
+      best.set(r.note_path, { score, heading: r.heading })
+      // heading may be null; title resolved later from notes join
+      titles.set(r.note_path, '')
+    }
+  }
+  if (titles.size) {
+    const titleRows = db
+      .prepare(`SELECT path, title FROM notes WHERE path IN (${[...titles.keys()].map(() => '?').join(',')})`)
+      .all(...titles.keys()) as { path: string; title: string }[]
+    for (const r of titleRows) titles.set(r.path, r.title)
+  }
+  return [...best.entries()]
+    .map(([note_path, v]) => ({ note_path, title: titles.get(note_path) ?? '', heading: v.heading, score: v.score }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, k)
 }
