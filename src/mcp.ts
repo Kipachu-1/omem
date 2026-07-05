@@ -12,15 +12,16 @@ import type { Embedder } from './embed.ts'
 
 /**
  * Server-level instructions injected into the agent's system prompt by MCP clients.
- * Accurate to the current 8-tool surface — sibling issues (OME-10/13/14) append
- * lines for `supersedes`, `memory_status`, and `kind` as those features land.
+ * Accurate to the current 9-tool surface — sibling issues (OME-10/14) append
+ * lines for `supersedes` and `kind` as those features land.
  * Keep under ~400 chars; some clients silently trim long instructions.
  */
 const INSTRUCTIONS =
   'Shared Obsidian memory vault via omem MCP. Call memory_search FIRST before answering anything ' +
-  'touching prior context (decisions, conventions, projects, people, gotchas). Search before ' +
-  'memory_write to avoid duplicates. Use memory_get_note for full notes, memory_recent for what ' +
-  'changed, memory_list to browse. Be conservative with writes — prefer append mode for small updates.'
+  'touching prior context (decisions, conventions, people, gotchas). Search before ' +
+  'memory_write to avoid duplicates. memory_get_note for full notes, memory_recent for what ' +
+  'changed, memory_list to browse. Be conservative with writes — prefer append mode. ' +
+  'memory_status for a fresh-session snapshot.'
 
 /** Build a fresh McpServer with all four memory tools registered (db/embedder are shared). */
 export function buildServer(db: DB, vault: string, embedder: Embedder): McpServer {
@@ -334,6 +335,71 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
     async () => {
       const { createGitSync } = await import('./git.ts')
       return json(await createGitSync(vault)({ pull: true }))
+    },
+  )
+
+  server.registerTool(
+    'memory_status',
+    {
+      title: 'Vault status snapshot',
+      description:
+        'Cheap one-call orientation: vault size, last modification, top folders, top tags, ' +
+        'pinned/archived counts, and a few most-recent notes. Use on a fresh session to decide ' +
+        'whether memory is worth querying, and what to query.',
+      inputSchema: {}, // no inputs
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      // single transaction so the snapshot is internally consistent
+      const snap = db.transaction(() => {
+        const notes = (db.prepare('SELECT COUNT(*) AS c FROM notes').get() as { c: number }).c
+        const chunks = (db.prepare('SELECT COUNT(*) AS c FROM chunks').get() as { c: number }).c
+        const embedded = (
+          db.prepare('SELECT COUNT(*) AS c FROM chunks WHERE embedding IS NOT NULL').get() as { c: number }
+        ).c
+        const maxMtime = (db.prepare('SELECT MAX(mtime) AS m FROM notes').get() as { m: number | null }).m
+        const pinned = (
+          db.prepare("SELECT COUNT(*) AS c FROM notes WHERE json_extract(frontmatter, '$.pinned') = 1").get() as {
+            c: number
+          }
+        ).c
+        const archived = (db.prepare("SELECT COUNT(*) AS c FROM notes WHERE path LIKE 'archive/%'").get() as { c: number }).c
+        const topFolders = db
+          .prepare(
+            `SELECT CASE WHEN instr(path, '/') = 0 THEN '' ELSE substr(path, 1, instr(path, '/') - 1) END AS folder,
+                    COUNT(*) AS count
+             FROM notes GROUP BY folder ORDER BY count DESC, folder ASC LIMIT 10`,
+          )
+          .all() as { folder: string; count: number }[]
+        const topTags = db
+          .prepare(
+            `SELECT dst AS tag, COUNT(DISTINCT src_path) AS count
+             FROM edges WHERE type = 'tag'
+             GROUP BY tag ORDER BY count DESC, tag ASC LIMIT 20`,
+          )
+          .all() as { tag: string; count: number }[]
+        const recent = db
+          .prepare('SELECT path, title, mtime FROM notes ORDER BY mtime DESC LIMIT 5')
+          .all() as { path: string; title: string; mtime: number }[]
+        return { notes, chunks, embedded, maxMtime, pinned, archived, topFolders, topTags, recent }
+      })()
+
+      return json({
+        notes: snap.notes,
+        chunks: snap.chunks,
+        embedded: snap.embedded,
+        lastModified: snap.maxMtime == null ? null : new Date(snap.maxMtime).toISOString(),
+        topFolders: snap.topFolders,
+        topTags: snap.topTags,
+        pinned: snap.pinned,
+        archived: snap.archived,
+        recent: snap.recent.map(r => ({
+          path: r.path,
+          title: r.title,
+          modified: new Date(r.mtime).toISOString(),
+          link: deepLink(r.path),
+        })),
+      })
     },
   )
 
