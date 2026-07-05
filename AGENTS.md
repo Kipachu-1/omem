@@ -11,6 +11,7 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 ## Test
 - `npm test` → `node --test "test/*.test.ts"`. Node's built-in test runner; no jest/vitest.
 - 83 tests, ~17s with model cached.
+- Test count as of OME-9: 89 (88 pre-existing + 1 instructions test). The "83" above is stale.
 
 ## Conventions
 - Version pins: `Dockerfile:24` pins the installed npm package version. When `package.json` version bumps, the Dockerfile pin must be bumped to match (or CI/deploy will lag by one release). The npm registry is the source of truth for available versions.
