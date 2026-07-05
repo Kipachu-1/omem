@@ -58,11 +58,11 @@ test('server advertises memory-usage instructions', async () => {
   assert.ok(instructions!.length <= 400, `instructions must stay under ~400 chars (got ${instructions!.length})`)
 })
 
-test('exposes exactly the eleven memory tools', async () => {
+test('exposes exactly the twelve memory tools', async () => {
   const { tools } = await client.listTools()
   assert.deepEqual(
     tools.map(t => t.name).sort(),
-    ['memory_archive', 'memory_get_note', 'memory_list', 'memory_move', 'memory_recall', 'memory_recent', 'memory_search', 'memory_status', 'memory_sync', 'memory_usage', 'memory_write'],
+    ['memory_archive', 'memory_get_note', 'memory_graph', 'memory_list', 'memory_move', 'memory_recall', 'memory_recent', 'memory_search', 'memory_status', 'memory_sync', 'memory_usage', 'memory_write'],
   )
 })
 

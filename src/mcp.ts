@@ -65,10 +65,6 @@ function resolveUsageMode(): UsageMode {
   return v === 'off' || v === 'stats' ? v : 'json'
 }
 let usageMode: UsageMode = resolveUsageMode()
-/** Test hook + startup banner helper: override the mode for this process. */
-export function setUsageMode(m: UsageMode): void {
-  usageMode = m
-}
 export function getUsageMode(): UsageMode {
   return usageMode
 }
@@ -387,7 +383,8 @@ export function buildServer(
       },
       annotations: { readOnlyHint: true },
     },
-    async a => {
+    async a =>
+      withUsage('memory_graph', a, async () => {
       const { rel } = safeRel(a.path)
       const seedRow = db.prepare('SELECT path, title, kind, pinned FROM notes WHERE path = ?').get(rel) as
         | { path: string; title: string; kind: string | null; pinned: number }
@@ -521,7 +518,7 @@ export function buildServer(
         byEmbedding: embFinal.map(e => ({ path: e.path, title: e.title, score: e.score, link: deepLink(e.path) })),
         totalNodes: total,
       })
-    },
+      }),
   )
 
   server.registerTool(
@@ -560,66 +557,84 @@ export function buildServer(
     async a =>
       withUsage('memory_write', a, async () => {
         const mode = a.mode ?? 'create'
-      let rel: string
-      let abs: string
+        let rel: string
+        let abs: string
 
-      if (mode === 'create') {
-        const folder = (a.folder ?? 'memory').replace(/\/+$/, '')
-        const slug =
-          a.title
-            .toLowerCase()
-            .replace(/[^\p{L}\p{N}]+/gu, '-')
-            .replace(/^-+|-+$/g, '')
-            .slice(0, 60) || 'note'
-        const date = new Date().toISOString().slice(0, 10)
-        let candidate = `${folder}/${date}-${slug}.md`
-        for (let n = 2; existsSync(safeRel(candidate).abs); n++) candidate = `${folder}/${date}-${slug}-${n}.md`
-        ;({ rel, abs } = safeRel(candidate))
-        assertIndexable(rel)
-        mkdirSync(resolve(abs, '..'), { recursive: true })
-        ;({ rel, abs } = safeRel(candidate)) // parent exists now: pick up its canonical casing
-      } else {
-        if (!a.path) throw new Error(`mode "${mode}" requires path`)
-        ;({ rel, abs } = safeRel(a.path.endsWith('.md') ? a.path : a.path + '.md'))
-        assertIndexable(rel)
-        if (!existsSync(abs)) throw new Error(`note not found: ${rel}`)
-      }
-
-      // `supersedes`: archive each old note as superseded by the new path BEFORE writing.
-      // Only valid on create (the new note is the successor); silently ignored on overwrite/append.
-      // Pre-validate ALL paths first so a mid-loop failure can't leave some notes archived
-      // but the new note never written (phantom successor reference).
-      let superseded: { archived: string; to: string; reason?: string }[] | undefined
-      if (mode === 'create' && a.supersedes?.length) {
-        for (const old of a.supersedes) {
-          const chk = safeRel(old.endsWith('.md') ? old : old + '.md')
-          if (!existsSync(chk.abs)) throw new Error(`supersedes target not found: ${chk.rel}`)
+        if (mode === 'create') {
+          const folder = (a.folder ?? 'memory').replace(/\/+$/, '')
+          const slug =
+            a.title
+              .toLowerCase()
+              .replace(/[^\p{L}\p{N}]+/gu, '-')
+              .replace(/^-+|-+$/g, '')
+              .slice(0, 60) || 'note'
+          const date = new Date().toISOString().slice(0, 10)
+          let candidate = `${folder}/${date}-${slug}.md`
+          for (let n = 2; existsSync(safeRel(candidate).abs); n++) candidate = `${folder}/${date}-${slug}-${n}.md`
+          ;({ rel, abs } = safeRel(candidate))
+          assertIndexable(rel)
+          mkdirSync(resolve(abs, '..'), { recursive: true })
+          ;({ rel, abs } = safeRel(candidate)) // parent exists now: pick up its canonical casing
+        } else {
+          if (!a.path) throw new Error(`mode "${mode}" requires path`)
+          ;({ rel, abs } = safeRel(a.path.endsWith('.md') ? a.path : a.path + '.md'))
+          assertIndexable(rel)
+          if (!existsSync(abs)) throw new Error(`note not found: ${rel}`)
         }
-        superseded = []
-        for (const old of a.supersedes) {
-          const r = await archiveNote(old, `superseded by ${rel}`)
-          superseded.push({ archived: r.archived, to: r.to, reason: `superseded by ${rel}` })
-        }
-      }
 
-      if (mode === 'append') {
-        appendFileSync(abs, `\n\n${a.content.trim()}\n`)
-      } else {
-        // provenance fields last: untrusted frontmatter must not spoof source/created/title
-        const fm: Record<string, unknown> = {
-          ...(a.frontmatter ?? {}),
-          title: a.title,
-          created: new Date().toISOString(),
-          source: 'agent',
-          ...(a.kind ? { kind: a.kind } : {}),
-          ...(a.tags?.length ? { tags: a.tags } : {}),
+        // `supersedes`: archive each old note as superseded by the new path BEFORE writing.
+        // Only valid on create (the new note is the successor); silently ignored on overwrite/append.
+        // Pre-validate ALL paths first so a mid-loop failure can't leave some notes archived
+        // but the new note never written (phantom successor reference).
+        let superseded: { archived: string; to: string; reason?: string }[] | undefined
+        if (mode === 'create' && a.supersedes?.length) {
+          for (const old of a.supersedes) {
+            const chk = safeRel(old.endsWith('.md') ? old : old + '.md')
+            if (!existsSync(chk.abs)) throw new Error(`supersedes target not found: ${chk.rel}`)
+          }
+          superseded = []
+          for (const old of a.supersedes) {
+            const r = await archiveNote(old, `superseded by ${rel}`)
+            superseded.push({ archived: r.archived, to: r.to, reason: `superseded by ${rel}` })
+          }
         }
-        const related = a.links?.length ? `\n\n## Related\n${a.links.map(l => `- [[${l}]]`).join('\n')}\n` : ''
-        writeFileSync(abs, matter.stringify(`\n${a.content.trim()}${related}`, fm))
-      }
 
-      await indexNow(rel)
-      return json({ path: rel, mode, link: deepLink(rel) })
+        if (mode === 'append') {
+          appendFileSync(abs, `\n\n${a.content.trim()}\n`)
+        } else {
+          // provenance fields last: untrusted frontmatter must not spoof source/created/title
+          const fm: Record<string, unknown> = {
+            ...(a.frontmatter ?? {}),
+            title: a.title,
+            created: new Date().toISOString(),
+            source: 'agent',
+            ...(a.kind ? { kind: a.kind } : {}),
+            ...(a.tags?.length ? { tags: a.tags } : {}),
+          }
+          const related = a.links?.length ? `\n\n## Related\n${a.links.map(l => `- [[${l}]]`).join('\n')}\n` : ''
+          writeFileSync(abs, matter.stringify(`\n${a.content.trim()}${related}`, fm))
+        }
+
+        await indexNow(rel)
+
+        // pre-write similarity check: embed the body, rank existing chunks, return near-dups.
+        // Non-blocking: failures degrade to an empty list, never break the write.
+        let similarExisting: { path: string; title: string; heading: string | null; score: number }[] = []
+        if (mode === 'create' && !a.skipDedup && a.content.trim().length >= 40) {
+          try {
+            const hits = await topSimilar(db, embedder, a.content, 5)
+            similarExisting = hits
+              .filter(h => h.note_path !== rel && h.score >= DEDUP_THRESHOLD)
+              .map(h => ({ path: h.note_path, title: h.title, heading: h.heading, score: h.score }))
+          } catch {
+            // embedder unavailable or model mismatch: skip silently
+          }
+        }
+
+        const out: Record<string, unknown> = { path: rel, mode, link: deepLink(rel) }
+        if (similarExisting.length) out.similarExisting = similarExisting
+        if (superseded) out.superseded = superseded
+        return json(out)
       }),
   )
 
@@ -768,28 +783,7 @@ export function buildServer(
     },
     async a =>
       withUsage('memory_archive', a, async () => {
-        const src = safeRel(a.path.endsWith('.md') ? a.path : a.path + '.md')
-        if (!existsSync(src.abs)) throw new Error(`note not found: ${src.rel}`)
-        if (src.rel.startsWith('archive/')) throw new Error(`already archived: ${src.rel}`)
-        const raw = readFileSync(src.abs, 'utf8')
-        let fm: Record<string, unknown> = {}
-        let content = raw
-        try {
-          const parsed = matter(raw)
-          if (parsed.data && typeof parsed.data === 'object') (fm = parsed.data as Record<string, unknown>), (content = parsed.content)
-        } catch {
-          // malformed frontmatter: archive the raw body under fresh frontmatter
-        }
-        fm = { ...fm, pinned: false, archived_at: new Date().toISOString(), ...(a.reason ? { archived_reason: a.reason } : {}) }
-        let dst = safeRel(`archive/${src.rel}`)
-        if (existsSync(dst.abs)) throw new Error(`archive target already exists: ${dst.rel}`)
-        mkdirSync(dirname(dst.abs), { recursive: true })
-        dst = safeRel(dst.rel)
-        writeFileSync(dst.abs, matter.stringify(content, fm))
-        unlinkSync(src.abs)
-        deleteNote(db, src.rel)
-        await indexNow(dst.rel)
-        return json({ archived: src.rel, to: dst.rel, link: deepLink(dst.rel) })
+        return json(await archiveNote(a.path, a.reason))
       }),
   )
 
