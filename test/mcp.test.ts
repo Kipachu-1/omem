@@ -44,6 +44,14 @@ after(async () => {
   rmSync(vault, { recursive: true, force: true })
 })
 
+test('server advertises memory-usage instructions', async () => {
+  const instructions = client.getInstructions()
+  assert.equal(typeof instructions, 'string')
+  assert.ok(instructions!.length > 0, 'instructions must be non-empty')
+  assert.ok(instructions!.includes('memory_search'), 'instructions must nudge memory_search')
+  assert.ok(instructions!.length <= 400, `instructions must stay under ~400 chars (got ${instructions!.length})`)
+})
+
 test('exposes exactly the eight memory tools', async () => {
   const { tools } = await client.listTools()
   assert.deepEqual(

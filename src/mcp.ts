@@ -10,6 +10,18 @@ import { indexFile, deleteNote, embedPending, SKIP_DIRS } from './indexer.ts'
 import { search } from './search.ts'
 import type { Embedder } from './embed.ts'
 
+/**
+ * Server-level instructions injected into the agent's system prompt by MCP clients.
+ * Accurate to the current 8-tool surface — sibling issues (OME-10/13/14) append
+ * lines for `supersedes`, `memory_status`, and `kind` as those features land.
+ * Keep under ~400 chars; some clients silently trim long instructions.
+ */
+const INSTRUCTIONS =
+  'Shared Obsidian memory vault via omem MCP. Call memory_search FIRST before answering anything ' +
+  'touching prior context (decisions, conventions, projects, people, gotchas). Search before ' +
+  'memory_write to avoid duplicates. Use memory_get_note for full notes, memory_recent for what ' +
+  'changed, memory_list to browse. Be conservative with writes — prefer append mode for small updates.'
+
 /** Build a fresh McpServer with all four memory tools registered (db/embedder are shared). */
 export function buildServer(db: DB, vault: string, embedder: Embedder): McpServer {
   const vaultAbs = realpathSync.native(resolve(vault))
@@ -58,7 +70,7 @@ export function buildServer(db: DB, vault: string, embedder: Embedder): McpServe
     }
   }
 
-  const server = new McpServer({ name: 'omem', version: '0.1.0' })
+  const server = new McpServer({ name: 'omem', version: '0.1.0' }, { instructions: INSTRUCTIONS })
 
   server.registerTool(
     'memory_search',
