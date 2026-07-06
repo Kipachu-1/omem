@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { bearerOk, resolveHttpClientName } from '../src/mcp.ts'
+import { bearerOk, resolveHttpClientName } from '../src/mcp/index.ts'
 
 test('bearerOk: auth is opt-in and constant-time-compared when enabled', () => {
   // no token configured -> open, whatever the client sends

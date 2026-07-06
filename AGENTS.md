@@ -46,7 +46,7 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 
 ## Architecture
 - **Entry**: `src/cli.ts` (the `omem` command). `applyEnvDefaults()` must run before any other import reads env.
-- **MCP tools**: `src/mcp.ts` — twelve tools (added `memory_usage` in OME-15), registered on a fresh `McpServer` per HTTP request (stateless mode) or one server for stdio.
+- **MCP tools**: `src/mcp/` module tree — twelve tools (added `memory_usage` in OME-15), registered on a fresh `McpServer` per HTTP request (stateless mode) or one server for stdio. Layout (OME-18 split): `server.ts` (buildServer + serveMcp/serveHttp + bearerOk + client-name resolvers), `shared.ts` (withUsage observability + constants + folderPat + kindSchema), `ctx.ts` (ToolCtx + buildToolCtx closure factory), `tools/{search,browse,write,ops}.ts` (register*Tools functions grouped by concern), `index.ts` (barrel re-export). `usageStats` lives in `shared.ts` only — tool files import it read-only. `archiveNote` lives on `ToolCtx` (shared between memory_archive + memory_write's supersedes path).
 - **Hybrid search fusion**: `src/search.ts` (FTS5 + vector cosine + 1-hop wikilink graph + memory-recency boost, RRF; + pinned/kind ranking boost per OME-14).
 - **Git sync state machine**: `src/git.ts` `createGitSync()` returns a closure with per-vault hygiene (one-shot `.gitignore` + index untracking, stale-lock detection, rebase recovery, conflict-snapshot suppression).
 
