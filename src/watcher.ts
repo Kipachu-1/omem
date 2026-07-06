@@ -9,13 +9,12 @@ import { relative, sep } from 'node:path'
 import { fullIndex, indexFile, deleteNote, embedPending, SKIP_DIRS } from './indexer.ts'
 import type { DB } from './db.ts'
 import type { Embedder } from './embed.ts'
-import { stamp, ok, yellow, red, dim, bold } from './ui.ts'
+import { stamp, ok, warn, yellow, red, dim, bold, spin } from './ui.ts'
 
 /** One embedder per process: the ONNX session loads once, not per file-save event. */
 export async function embedAll(db: DB, embedder: Embedder): Promise<void> {
   const pending = (db.prepare('SELECT count(*) n FROM chunks WHERE embedding IS NULL').get() as { n: number }).n
   if (!pending) return
-  const { spin, warn } = await import('./ui.ts')
   const s = spin(`embedding ${pending} chunk${pending === 1 ? '' : 's'}`)
   try {
     const n = await embedPending(db, embedder)

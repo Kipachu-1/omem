@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { withUsage, kindSchema, folderPat } from '../../shared.ts'
+import { tagEscape } from '../../../filters.ts'
 import type { ToolCtx } from '../../ctx.ts'
 
 /** Register memory_list: enumerate vault notes by folder and/or tag. */
@@ -36,7 +37,7 @@ export function registerList(server: McpServer, ctx: ToolCtx): void {
           where.push(
             "EXISTS (SELECT 1 FROM edges e WHERE e.src_path = notes.path AND e.type = 'tag' AND (e.dst = ? OR e.dst LIKE ? ESCAPE '\\'))",
           )
-          params.push(a.tag, a.tag.replace(/[\\%_]/g, m => '\\' + m) + '/%')
+          params.push(a.tag, tagEscape(a.tag) + '/%')
         }
         const rows = db
           .prepare(
