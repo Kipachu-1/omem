@@ -328,7 +328,7 @@ async function main(): Promise<void> {
       const s = fullIndex(db, vault)
       ok(`initial sync: indexed ${s.indexed}, removed ${s.removed}, unchanged ${s.unchanged}`)
       await startWatcher(db, vault, parsePoll(30), gitPullSec())
-      const { serveMcp, serveHttp, getUsageMode } = await import('./mcp.ts')
+      const { serveMcp, serveHttp, getUsageMode } = await import('./mcp/index.ts')
       console.error(`omem: usage log: ${getUsageMode()} (stderr)`)
       if (values.port !== undefined) {
         const port = Number(values.port)
