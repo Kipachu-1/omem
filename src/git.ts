@@ -111,46 +111,48 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
     return resolve(vault, out)
   }
 
-  return async function gitSync(opts: GitSyncOpts = {}): Promise<GitSyncResult> {
-    const res: GitSyncResult = { ok: true, committed: 0, pushed: 0, pulled: false }
-    const skip = (why: string): GitSyncResult => ((res.skipped = why), res)
-
-    // --- preflight
+  /** preflight: repo exists, not detached, no stale lock, recover interrupted rebase. Returns skip reason or null. */
+  async function preflight(): Promise<string | null> {
     if (!(await tryGit(['rev-parse', '--is-inside-work-tree']))) {
       warnOnce('norepo', `omem git: ${vault} is not a git repository — sync disabled`)
-      return skip('not a repo')
+      return 'not a repo'
     }
     if (!(await tryGit(['symbolic-ref', '--short', '-q', 'HEAD']))) {
       warnOnce('detached', 'omem git: detached HEAD — sync disabled until a branch is checked out')
-      return skip('detached HEAD')
+      return 'detached HEAD'
     }
     const lock = await gitPath('index.lock')
     if (existsSync(lock)) {
       const age = Date.now() - statSync(lock).mtimeMs
       if (age > STALE_LOCK_MS)
         console.error(`omem git: index.lock is ${Math.round(age / 60_000)} min old (${lock}) — remove it if no git process is running`)
-      return skip('index.lock held') // another git process; git's own locking keeps things safe
+      return 'index.lock held' // another git process; git's own locking keeps things safe
     }
     if (existsSync(await gitPath('rebase-merge')) || existsSync(await gitPath('rebase-apply'))) {
       console.error('omem git: recovering from an interrupted rebase')
       ;(await tryGit(['rebase', '--abort'])) ?? (await tryGit(['rebase', '--quit']))
     }
+    return null
+  }
 
-    // --- once per process: ignore hygiene + untrack the derived index
-    if (!hygieneDone) {
-      hygieneDone = true
-      const gi = resolve(vault, '.gitignore')
-      const cur = existsSync(gi) ? readFileSync(gi, 'utf8') : ''
-      if (!cur.includes('# omem')) {
-        appendFileSync(gi, `${cur && !cur.endsWith('\n') ? '\n' : ''}# omem\n.omem/\n.DS_Store\n.obsidian/workspace*\n`)
-      }
-      if ((await tryGit(['ls-files', '--', '.omem']))?.stdout.trim()) {
-        await tryGit(['rm', '-r', '--cached', '-q', '--', '.omem'])
-        console.error('omem git: untracked .omem/ (the index is derived; it does not belong in the repo)')
-      }
+  /** once per process: ignore hygiene + untrack the derived index. */
+  async function hygiene(): Promise<void> {
+    if (hygieneDone) return
+    hygieneDone = true
+    const gi = resolve(vault, '.gitignore')
+    const cur = existsSync(gi) ? readFileSync(gi, 'utf8') : ''
+    if (!cur.includes('# omem')) {
+      appendFileSync(gi, `${cur && !cur.endsWith('\n') ? '\n' : ''}# omem\n.omem/\n.DS_Store\n.obsidian/workspace*\n`)
     }
+    if ((await tryGit(['ls-files', '--', '.omem']))?.stdout.trim()) {
+      await tryGit(['rm', '-r', '--cached', '-q', '--', '.omem'])
+      console.error('omem git: untracked .omem/ (the index is derived; it does not belong in the repo)')
+    }
+  }
 
-    // --- commit (pathspec is mandatory: bare -A stages the whole repo when the vault is nested in one)
+  /** commit staged changes (pathspec mandatory: bare -A stages the whole repo when vault is nested). */
+  async function commitPhase(res: GitSyncResult): Promise<void> {
+    // pathspec is mandatory: bare -A stages the whole repo when the vault is nested in one
     await git(['add', '-A', '--', '.'])
     if ((await tryGit(['diff', '--cached', '--quiet', '--', '.'])) === null) {
       const names = (await git(['diff', '--cached', '--name-only', '--', '.'])).stdout.trim().split('\n').filter(Boolean)
@@ -159,6 +161,56 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
       res.committed = names.length
       console.error(`omem git: committed ${names.length} file(s)`)
     }
+  }
+
+  /** pull --rebase; returns false on conflict/fail (caller sets res.ok). */
+  async function pullPhase(res: GitSyncResult, opts: GitSyncOpts): Promise<boolean> {
+    if (opts.pull === false) return true
+    const p = await pullRebase()
+    if (p === 'conflict' || p === 'fail') return ((res.ok = false), false)
+    res.pulled = true
+    return true
+  }
+
+  /** push with non-fast-forward retry (integrate once, then retry). */
+  async function pushPhase(res: GitSyncResult): Promise<void> {
+    const ahead = Number((await git(['rev-list', '--count', '@{u}..HEAD'])).stdout.trim())
+    if (ahead <= 0) return
+    try {
+      await git([...cred, 'push', '-q'], NET_MS)
+      res.pushed = ahead
+      console.error(`omem git: pushed ${ahead} commit(s)`)
+    } catch (e) {
+      // non-fast-forward: someone pushed concurrently — integrate once and retry
+      if ((await pullRebase()) === 'ok') {
+        try {
+          await git([...cred, 'push', '-q'], NET_MS)
+          res.pushed = Number((await git(['rev-list', '--count', 'HEAD', '--not', '--remotes'])).stdout.trim()) || 1
+          console.error('omem git: pushed after integrating a concurrent update')
+          return
+        } catch (e2) {
+          console.error(`omem git: push failed (${firstLine(e2)}) — retrying next cycle`)
+        }
+      } else {
+        console.error(`omem git: push failed (${firstLine(e)}) — retrying next cycle`)
+      }
+      res.ok = false
+    }
+  }
+
+  return async function gitSync(opts: GitSyncOpts = {}): Promise<GitSyncResult> {
+    const res: GitSyncResult = { ok: true, committed: 0, pushed: 0, pulled: false }
+    const skip = (why: string): GitSyncResult => ((res.skipped = why), res)
+
+    // --- preflight
+    const skipReason = await preflight()
+    if (skipReason) return skip(skipReason)
+
+    // --- once per process: ignore hygiene + untrack the derived index
+    await hygiene()
+
+    // --- commit
+    await commitPhase(res)
 
     // --- unborn branch / no upstream: local commits are still the backup
     if (!(await head())) {
@@ -171,36 +223,11 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
     }
 
     // --- pull
-    if (opts.pull !== false) {
-      const p = await pullRebase()
-      if (p === 'conflict' || p === 'fail') return ((res.ok = false), res)
-      res.pulled = true
-    }
+    if (!(await pullPhase(res, opts))) return res
 
     // --- push
-    const ahead = Number((await git(['rev-list', '--count', '@{u}..HEAD'])).stdout.trim())
-    if (ahead > 0) {
-      try {
-        await git([...cred, 'push', '-q'], NET_MS)
-        res.pushed = ahead
-        console.error(`omem git: pushed ${ahead} commit(s)`)
-      } catch (e) {
-        // non-fast-forward: someone pushed concurrently — integrate once and retry
-        if ((await pullRebase()) === 'ok') {
-          try {
-            await git([...cred, 'push', '-q'], NET_MS)
-            res.pushed = Number((await git(['rev-list', '--count', 'HEAD', '--not', '--remotes'])).stdout.trim()) || 1
-            console.error('omem git: pushed after integrating a concurrent update')
-            return res
-          } catch (e2) {
-            console.error(`omem git: push failed (${firstLine(e2)}) — retrying next cycle`)
-          }
-        } else {
-          console.error(`omem git: push failed (${firstLine(e)}) — retrying next cycle`)
-        }
-        res.ok = false
-      }
-    }
+    await pushPhase(res)
+
     return res
   }
 }

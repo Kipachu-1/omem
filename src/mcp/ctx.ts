@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, realpathSync, renameSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
-import matter from 'gray-matter'
+import { parseFrontmatter, stringifyFrontmatter } from '../frontmatter.ts'
 import type { DB } from '../db.ts'
 import { indexFile, deleteNote, embedPending, SKIP_DIRS } from '../indexer.ts'
 import type { Embedder } from '../embed.ts'
@@ -84,17 +84,9 @@ export function buildToolCtx(
     if (!existsSync(src.abs)) throw new Error(`note not found: ${src.rel}`)
     if (src.rel.startsWith('archive/')) throw new Error(`already archived: ${src.rel}`)
     const raw = readFileSync(src.abs, 'utf8')
-    let fm: Record<string, unknown> = {}
-    let content = raw
-    try {
-      const parsed = matter(raw)
-      if (parsed.data && typeof parsed.data === 'object')
-        (fm = parsed.data as Record<string, unknown>), (content = parsed.content)
-    } catch {
-      // malformed frontmatter: archive the raw body under fresh frontmatter
-    }
-    fm = {
-      ...fm,
+    const { frontmatter, content } = parseFrontmatter(raw)
+    const fm: Record<string, unknown> = {
+      ...frontmatter,
       pinned: false,
       archived_at: new Date().toISOString(),
       ...(reason ? { archived_reason: reason } : {}),
@@ -103,7 +95,7 @@ export function buildToolCtx(
     if (existsSync(dst.abs)) throw new Error(`archive target already exists: ${dst.rel}`)
     mkdirSync(dirname(dst.abs), { recursive: true })
     dst = safeRel(dst.rel)
-    writeFileSync(dst.abs, matter.stringify(content, fm))
+    writeFileSync(dst.abs, stringifyFrontmatter(content, fm))
     unlinkSync(src.abs)
     deleteNote(db, src.rel)
     await indexNow(dst.rel)

@@ -8,7 +8,7 @@ import type { Embedder } from '../embed.ts'
 import { INSTRUCTIONS, getUsageMode } from './shared.ts'
 import { buildToolCtx } from './ctx.ts'
 import { registerSearchTools } from './tools/search.ts'
-import { registerBrowseTools } from './tools/browse.ts'
+import { registerBrowseTools } from './tools/browse/index.ts'
 import { registerWriteTools } from './tools/write.ts'
 import { registerOpsTools } from './tools/ops.ts'
 

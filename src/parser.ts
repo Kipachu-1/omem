@@ -1,5 +1,5 @@
-import matter from 'gray-matter'
 import { basename } from 'node:path'
+import { parseFrontmatter } from './frontmatter.ts'
 
 export interface Chunk {
   heading: string | null
@@ -20,21 +20,8 @@ const CHUNK_MAX = 1500
 const OVERLAP = 200
 
 export function parseNote(relPath: string, raw: string): ParsedNote {
-  let frontmatter: Record<string, unknown> = {}
-  let content = raw
-  if (/^---\r?\n/.test(raw)) {
-    try {
-      const fm = matter(raw)
-      // scalar "frontmatter" means the leading --- was a horizontal rule, not YAML — keep the text
-      if (fm.data && typeof fm.data === 'object' && !Array.isArray(fm.data)) {
-        frontmatter = fm.data
-        content = fm.content
-      }
-    } catch {
-      // malformed YAML: treat whole file as content
-    }
-  }
-  content = content.replace(/\r\n/g, '\n')
+  const { frontmatter, content: contentRaw } = parseFrontmatter(raw)
+  const content = contentRaw.replace(/\r\n/g, '\n')
 
   const title =
     typeof frontmatter.title === 'string' && frontmatter.title.trim()

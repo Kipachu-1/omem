@@ -1,5 +1,6 @@
 import { getMeta, type DB } from './db.ts'
 import { bufToVec, dot, type Embedder } from './embed.ts'
+import { folderPat, tagEscape } from './filters.ts'
 
 export interface SearchOpts {
   limit?: number
@@ -257,7 +258,7 @@ function allowedPaths(db: DB, opts: SearchOpts): Set<string> | null {
   const params: unknown[] = []
   if (opts.folder) {
     where.push("path LIKE ? ESCAPE '\\'")
-    params.push(opts.folder.replace(/\/+$/, '').replace(/[\\%_]/g, m => '\\' + m) + '/%')
+    params.push(folderPat(opts.folder))
   }
   if (opts.after != null) (where.push('mtime >= ?'), params.push(opts.after))
   if (opts.before != null) (where.push('mtime <= ?'), params.push(opts.before))
@@ -272,7 +273,7 @@ function allowedPaths(db: DB, opts: SearchOpts): Set<string> | null {
       "EXISTS (SELECT 1 FROM edges e WHERE e.src_path = notes.path AND e.type = 'tag' AND (e.dst = ? OR e.dst LIKE ? ESCAPE '\\'))",
     )
     const t = tag.replace(/^#/, '')
-    params.push(t, t.replace(/[\\%_]/g, m => '\\' + m) + '/%')
+    params.push(t, tagEscape(t) + '/%')
   }
   const rows = db.prepare(`SELECT path FROM notes WHERE ${where.join(' AND ')}`).all(...params) as { path: string }[]
   return new Set(rows.map(r => r.path))

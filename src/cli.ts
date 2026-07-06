@@ -2,15 +2,16 @@
 import { applyEnvDefaults } from './config.ts'
 import { parseArgs } from 'node:util'
 import { existsSync, rmSync, readFileSync, statSync, readdirSync } from 'node:fs'
-import { join, relative, resolve, sep } from 'node:path'
+import { join, resolve } from 'node:path'
 
 // must run before anything reads env-derived values (config file + .env fill the gaps)
 applyEnvDefaults()
 import { openDb, getMeta, type DB } from './db.ts'
-import { fullIndex, indexFile, deleteNote, embedPending, SKIP_DIRS } from './indexer.ts'
+import { fullIndex } from './indexer.ts'
 import { localEmbedder, defaultModel } from './embed.ts'
 import { search, type MatchType } from './search.ts'
-import { bold, dim, cyan, green, yellow, magenta, red, ok, warn, fail, stamp, spin } from './ui.ts'
+import { startWatcher, embedAll } from './watcher.ts'
+import { bold, dim, cyan, green, yellow, magenta, ok, warn, fail, spin } from './ui.ts'
 
 const cmdLine = (name: string, desc: string) => `  ${cyan(name.padEnd(8))} ${desc}`
 const USAGE = `${bold('omem')} — obsidian vault memory index
@@ -78,20 +79,6 @@ function dbPath(vault: string): string {
 // one embedder per process: the ONNX session loads once, not per file-save event
 const embedder = localEmbedder()
 
-async function embedAll(db: DB): Promise<void> {
-  const pending = (db.prepare('SELECT count(*) n FROM chunks WHERE embedding IS NULL').get() as { n: number }).n
-  if (!pending) return
-  const s = spin(`embedding ${pending} chunk${pending === 1 ? '' : 's'}`)
-  try {
-    const n = await embedPending(db, embedder)
-    s.done()
-    if (n) ok(`embedded ${n} chunk${n === 1 ? '' : 's'}`)
-  } catch (e) {
-    s.done()
-    warn(`embedding failed (${(e as Error).message}) — search is keyword-only until the next index run`)
-  }
-}
-
 function parseLimit(): number | undefined {
   if (values.limit === undefined) return undefined
   const n = Number(values.limit)
@@ -146,110 +133,6 @@ function gitPullSec(): number | undefined {
   return n
 }
 
-/** Initial sync + live file events + optional periodic full-sync sweep + optional git sync. */
-async function startWatcher(db: DB, vault: string, pollSec: number, gitPullSec?: number): Promise<void> {
-  const { default: chokidar } = await import('chokidar')
-  let queue = Promise.resolve()
-  const enqueue = (fn: () => void | Promise<void>) => {
-    queue = queue.then(fn).catch(e => console.error('watch error:', e))
-  }
-  const timers = new Map<string, NodeJS.Timeout>()
-  const debounced = (rel: string, fn: () => void) => {
-    clearTimeout(timers.get(rel))
-    timers.set(rel, setTimeout(() => (timers.delete(rel), fn()), 500))
-  }
-  const relOf = (abs: string) => relative(vault, abs).split(sep).join('/')
-  const isMd = (rel: string) => rel.toLowerCase().endsWith('.md')
-  const isIgnored = (abs: string) =>
-    relOf(abs)
-      .split('/')
-      .some(part => part.startsWith('.') || SKIP_DIRS.has(part))
-
-  let lastFsEventAt = 0
-
-  const onWrite = (abs: string): void => {
-    lastFsEventAt = Date.now()
-    const rel = relOf(abs)
-    if (!isMd(rel)) return
-    debounced(rel, () =>
-      enqueue(async () => {
-        try {
-          if (indexFile(db, vault, rel)) {
-            console.error(`${stamp()} ${yellow('~')} ${rel}`)
-            await embedAll(db)
-          }
-        } catch (e) {
-          // deleted between event and read: the unlink event handles it
-          if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
-        }
-      }),
-    )
-  }
-
-  // watcher first, initial sync queued behind 'ready': no lost-event window between scan and watch
-  chokidar
-    .watch(vault, { ignored: isIgnored, ignoreInitial: true })
-    .on('add', onWrite)
-    .on('change', onWrite)
-    .on('unlink', abs => {
-      lastFsEventAt = Date.now()
-      const rel = relOf(abs)
-      if (isMd(rel)) debounced(rel, () => enqueue(() => (deleteNote(db, rel), console.error(`${stamp()} ${red('-')} ${rel}`))))
-    })
-    .on('ready', () =>
-      enqueue(async () => {
-        const s = fullIndex(db, vault)
-        ok(`indexed ${s.indexed}, removed ${s.removed}, unchanged ${s.unchanged} — watching ${bold(vault)}`)
-        await embedAll(db)
-      }),
-    )
-
-  // periodic full-sync sweep: hash-diffed, so a quiet vault costs ~nothing;
-  // catches anything file events missed and repairs external index damage
-  if (pollSec > 0) {
-    console.error(dim(`full-sync sweep every ${pollSec}s`))
-    setInterval(
-      () =>
-        enqueue(async () => {
-          const s = fullIndex(db, vault)
-          if (s.indexed || s.removed) {
-            console.error(`${stamp()} sweep: indexed ${s.indexed}, removed ${s.removed}`)
-            await embedAll(db)
-          }
-        }),
-      pollSec * 1000,
-    )
-  }
-
-  // git auto-sync: commit+push on dirty ticks; pull on its own slower clock so a
-  // read-only machine still receives remote changes
-  if (gitPullSec !== undefined) {
-    const { createGitSync } = await import('./git.ts')
-    const gitSync = createGitSync(vault, () =>
-      enqueue(async () => {
-        const s = fullIndex(db, vault)
-        if (s.indexed || s.removed) {
-          console.error(`${stamp()} pulled: indexed ${s.indexed}, removed ${s.removed}`)
-          await embedAll(db)
-        }
-      }),
-    )
-    const tickSec = pollSec > 0 ? pollSec : 30
-    let lastPullAt = 0
-    console.error(dim(`git sync every ${tickSec}s (pull every ${gitPullSec}s)`))
-    setInterval(
-      () =>
-        enqueue(async () => {
-          if (Date.now() - lastFsEventAt < 2000) return // mid-save quiescence: ride the next tick
-          const pull = Date.now() - lastPullAt >= gitPullSec * 1000
-          if (pull) lastPullAt = Date.now()
-          await gitSync({ pull })
-        }),
-      tickSec * 1000,
-    )
-  }
-}
-
 async function main(): Promise<void> {
   switch (cmd) {
     case 'index': {
@@ -259,7 +142,7 @@ async function main(): Promise<void> {
       const s = fullIndex(db, vault)
       sp.done()
       ok(`indexed ${s.indexed}, removed ${s.removed}, unchanged ${s.unchanged}`)
-      await embedAll(db)
+      await embedAll(db, embedder)
       break
     }
 
@@ -272,7 +155,7 @@ async function main(): Promise<void> {
       const s = fullIndex(db, vault)
       sp.done()
       ok(`indexed ${s.indexed} notes from scratch`)
-      await embedAll(db)
+      await embedAll(db, embedder)
       break
     }
 
@@ -316,7 +199,7 @@ async function main(): Promise<void> {
 
     case 'watch': {
       const vault = vaultPath()
-      await startWatcher(openDb(dbPath(vault)), vault, parsePoll(0), gitPullSec())
+      await startWatcher(openDb(dbPath(vault)), vault, parsePoll(0), gitPullSec(), embedder)
       break
     }
 
@@ -327,7 +210,7 @@ async function main(): Promise<void> {
       // embeddings fill in asynchronously via the watcher's ready-pass
       const s = fullIndex(db, vault)
       ok(`initial sync: indexed ${s.indexed}, removed ${s.removed}, unchanged ${s.unchanged}`)
-      await startWatcher(db, vault, parsePoll(30), gitPullSec())
+      await startWatcher(db, vault, parsePoll(30), gitPullSec(), embedder)
       const { serveMcp, serveHttp, getUsageMode } = await import('./mcp/index.ts')
       console.error(`omem: usage log: ${getUsageMode()} (stderr)`)
       if (values.port !== undefined) {
