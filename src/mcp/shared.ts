@@ -120,5 +120,6 @@ export async function withUsage<T>(tool: string, args: unknown, fn: () => Promis
   }
 }
 
-/** folder LIKE-pattern with %/_/\ escaped, shared by recent/list-style filters */
-export const folderPat = (f: string) => f.replace(/\/+$/, '').replace(/[\\%_]/g, m => '\\' + m) + '/%'
+/** folder LIKE-pattern with %/_/\ escaped, shared by recent/list-style filters.
+ *  Re-exported from src/filters.ts (the canonical home) for backwards compatibility. */
+export { folderPat } from '../filters.ts'

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { existsSync, mkdirSync, writeFileSync, appendFileSync, renameSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
-import matter from 'gray-matter'
+import { stringifyFrontmatter } from '../../frontmatter.ts'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { deleteNote } from '../../indexer.ts'
 import { topSimilar } from '../../search.ts'
@@ -103,7 +103,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolCtx): void {
             ...(a.tags?.length ? { tags: a.tags } : {}),
           }
           const related = a.links?.length ? `\n\n## Related\n${a.links.map(l => `- [[${l}]]`).join('\n')}\n` : ''
-          writeFileSync(abs, matter.stringify(`\n${a.content.trim()}${related}`, fm))
+          writeFileSync(abs, stringifyFrontmatter(`\n${a.content.trim()}${related}`, fm))
         }
 
         await indexNow(rel)
