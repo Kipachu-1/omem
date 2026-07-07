@@ -10,6 +10,27 @@ No LLM, no cloud, no lock-in — just markdown, an index, and a server.
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![mcp](https://img.shields.io/badge/MCP-server-purple)](https://modelcontextprotocol.io)
 
+## Install
+
+```sh
+# one-shot: install, pick a vault, index, register with your MCP client
+npx -y @kipachu/omem setup
+
+# or manual
+npm i -g @kipachu/omem
+omem init ~/my-vault   # template vault (or point at an existing one)
+omem setup             # wire it up
+omem agents            # register with Claude Code, Cursor, Windsurf, Gemini CLI, …
+```
+
+No vault yet? [`template/`](./template) is a ready-to-use starting structure:
+per-domain `islands/`, `inbox/` for triage, `archive/` for superseded notes, and
+[`CONVENTIONS.md`](./template/CONVENTIONS.md) that teaches agents the write rules.
+
+> **npm version:** published latest is 0.6.1. The full feature set below is on
+> `main` (0.7.0) and lands on the registry when `npm publish` runs. Clone the repo
+> for the complete surface today.
+
 ## How it works
 
 ```
@@ -130,27 +151,6 @@ instead of duplicating:
   ]
 }
 ```
-
-## Install
-
-```sh
-# one-shot: install, pick a vault, index, register with your MCP client
-npx -y @kipachu/omem setup
-
-# or manual
-npm i -g @kipachu/omem
-omem init ~/my-vault   # template vault (or point at an existing one)
-omem setup             # wire it up
-omem agents            # register with Claude Code, Cursor, Windsurf, Gemini CLI, …
-```
-
-No vault yet? [`template/`](./template) is a ready-to-use starting structure:
-per-domain `islands/`, `inbox/` for triage, `archive/` for superseded notes, and
-[`CONVENTIONS.md`](./template/CONVENTIONS.md) that teaches agents the write rules.
-
-> **npm version:** published latest is 0.6.1. The full feature set below is on
-> `main` (0.7.0) and lands on the registry when `npm publish` runs. Clone the repo
-> for the complete surface today.
 
 ## Run modes
 
