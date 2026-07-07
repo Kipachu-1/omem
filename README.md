@@ -27,9 +27,7 @@ No vault yet? [`template/`](./template) is a ready-to-use starting structure:
 per-domain `islands/`, `inbox/` for triage, `archive/` for superseded notes, and
 [`CONVENTIONS.md`](./template/CONVENTIONS.md) that teaches agents the write rules.
 
-> **npm version:** published latest is 0.6.1. The full feature set below is on
-> `main` (0.7.0) and lands on the registry when `npm publish` runs. Clone the repo
-> for the complete surface today.
+> **npm version:** published latest is 0.7.0 — the full feature set below is live on the registry.
 
 ## How it works
 
@@ -238,7 +236,7 @@ memory as needed" pitch:
 - **Usage observability** — per-tool-call stats on stderr (JSON, scrubbed) + an
   on-demand aggregate tool.
 
-All eight are on `main`; npm publish pending (published latest is 0.6.1).
+All eight are on `main` and published to npm (0.7.0).
 
 ## Limits + non-goals
 
