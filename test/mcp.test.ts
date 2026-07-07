@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { cpSync, mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs'
+import { cpSync, mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, utimesSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -58,11 +58,11 @@ test('server advertises memory-usage instructions', async () => {
   assert.ok(instructions!.length <= 400, `instructions must stay under ~400 chars (got ${instructions!.length})`)
 })
 
-test('exposes exactly the twelve memory tools', async () => {
+test('exposes exactly the thirteen memory tools', async () => {
   const { tools } = await client.listTools()
   assert.deepEqual(
     tools.map(t => t.name).sort(),
-    ['memory_archive', 'memory_get_note', 'memory_graph', 'memory_list', 'memory_move', 'memory_recall', 'memory_recent', 'memory_search', 'memory_status', 'memory_sync', 'memory_usage', 'memory_write'],
+    ['memory_archive', 'memory_get_note', 'memory_graph', 'memory_list', 'memory_move', 'memory_recall', 'memory_recent', 'memory_search', 'memory_status', 'memory_sync', 'memory_unused', 'memory_usage', 'memory_write'],
   )
 })
 
@@ -303,6 +303,118 @@ test('memory_status is advertised as read-only', async () => {
   const tool = tools.find(t => t.name === 'memory_status')
   assert.ok(tool, 'memory_status must be listed')
   assert.equal(tool.annotations?.readOnlyHint, true, 'memory_status must declare readOnlyHint')
+})
+
+// ---- OME-24: memory_unused (vault drift detection) ----
+
+test('memory_unused on an empty vault returns empty result', async () => {
+  const emptyVault = mkdtempSync(join(tmpdir(), 'omem-unused-empty-'))
+  const emptyClient = new Client({ name: 'omem-unused-empty-test', version: '0.0.0' })
+  await emptyClient.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [join(ROOT, 'src/cli.ts'), 'serve', '--vault', emptyVault, '--poll', '3600'],
+      stderr: 'ignore',
+    }),
+  )
+  try {
+    const r = await callOn(emptyClient, 'memory_unused', {})
+    assert.equal(r.scanned, 0)
+    assert.equal(r.matched, 0)
+    assert.deepEqual(r.notes, [])
+  } finally {
+    await emptyClient.close()
+    rmSync(emptyVault, { recursive: true, force: true })
+  }
+})
+
+test('memory_unused returns only unpinned + unreferenced + old notes', async () => {
+  // dedicated vault so scanned/matched are deterministic. Files written directly
+  // with explicit mtimes (utimesSync) so the serve's boot fullIndex records the
+  // real ages — memory_write would stamp now.
+  const v = mkdtempSync(join(tmpdir(), 'omem-unused-pred-'))
+  const oldSec = Math.floor((Date.now() - 60 * 86_400_000) / 1000) // 60 days ago
+  mkdirSync(join(v, 'memory'), { recursive: true })
+  writeFileSync(join(v, 'memory/pinned-fresh.md'),
+    '---\npinned: true\n---\nFresh pinned note. Should be excluded by predicate 1.\n')
+  writeFileSync(join(v, 'memory/stale-orphan.md'),
+    '---\nconfidence: 0.3\n---\nOld, unpinned, no inlinks. Should match.\n')
+  writeFileSync(join(v, 'memory/stale-linked.md'),
+    '---\n---\nOld, unpinned, but has an inlink. Should be excluded by predicate 4.\n')
+  writeFileSync(join(v, 'memory/linker-fresh.md'),
+    'Fresh note linking to [[stale-linked]]. Creates an inlink edge to stale-linked.\n')
+  // stale notes get an old mtime; fresh notes keep now
+  utimesSync(join(v, 'memory/stale-orphan.md'), oldSec, oldSec)
+  utimesSync(join(v, 'memory/stale-linked.md'), oldSec, oldSec)
+
+  const c = new Client({ name: 'omem-unused-pred-test', version: '0.0.0' })
+  await c.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [join(ROOT, 'src/cli.ts'), 'serve', '--vault', v, '--poll', '3600'],
+      stderr: 'ignore',
+    }),
+  )
+  try {
+    const r = await callOn(c, 'memory_unused', { mtime_days: 30 })
+    assert.equal(r.scanned, 4, 'all four notes scanned')
+    assert.equal(r.matched, 1, 'only the stale orphan matches')
+    assert.equal(r.notes.length, 1)
+    assert.equal(r.notes[0].path, 'memory/stale-orphan.md')
+    assert.ok(r.notes[0].mtime_days >= 59 && r.notes[0].mtime_days <= 61, `mtime_days ~60, got ${r.notes[0].mtime_days}`)
+    assert.equal(r.notes[0].inlinks, 0)
+    assert.equal(r.notes[0].confidence, 0.3)
+    assert.equal(typeof r.notes[0].mtime, 'string')
+    assert.ok(r.notes[0].link.startsWith('obsidian://open?vault='))
+  } finally {
+    await c.close()
+    rmSync(v, { recursive: true, force: true })
+  }
+})
+
+test('memory_unused is advertised as read-only', async () => {
+  const { tools } = await client.listTools()
+  const tool = tools.find(t => t.name === 'memory_unused')
+  assert.ok(tool, 'memory_unused must be listed')
+  assert.equal(tool.annotations?.readOnlyHint, true, 'memory_unused must declare readOnlyHint')
+})
+
+test('memory_unused folder filter scopes correctly', async () => {
+  // two stale orphan notes in different folders; folder filter must restrict both
+  // scanned and the returned notes to the requested folder prefix.
+  const v = mkdtempSync(join(tmpdir(), 'omem-unused-folder-'))
+  const oldSec = Math.floor((Date.now() - 60 * 86_400_000) / 1000)
+  mkdirSync(join(v, 'memory'), { recursive: true })
+  mkdirSync(join(v, 'notes'), { recursive: true })
+  writeFileSync(join(v, 'memory/stale-a.md'), '---\n---\nOld orphan in memory/.\n')
+  writeFileSync(join(v, 'notes/stale-b.md'), '---\n---\nOld orphan in notes/.\n')
+  utimesSync(join(v, 'memory/stale-a.md'), oldSec, oldSec)
+  utimesSync(join(v, 'notes/stale-b.md'), oldSec, oldSec)
+
+  const c = new Client({ name: 'omem-unused-folder-test', version: '0.0.0' })
+  await c.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [join(ROOT, 'src/cli.ts'), 'serve', '--vault', v, '--poll', '3600'],
+      stderr: 'ignore',
+    }),
+  )
+  try {
+    const all = await callOn(c, 'memory_unused', { mtime_days: 30 })
+    assert.equal(all.scanned, 2)
+    assert.equal(all.matched, 2)
+    assert.equal(all.notes.length, 2)
+
+    const mem = await callOn(c, 'memory_unused', { mtime_days: 30, folder: 'memory/' })
+    assert.equal(mem.scanned, 1, 'folder filter scopes scanned')
+    assert.equal(mem.matched, 1)
+    assert.equal(mem.notes.length, 1)
+    assert.equal(mem.notes[0].path, 'memory/stale-a.md')
+    assert.ok(mem.notes.every((n: { path: string }) => n.path.startsWith('memory/')))
+  } finally {
+    await c.close()
+    rmSync(v, { recursive: true, force: true })
+  }
 })
 
 // ---- OME-10: dedup-on-write: supersedes + similarExisting ----
