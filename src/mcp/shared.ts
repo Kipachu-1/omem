@@ -7,7 +7,7 @@ export const DEDUP_THRESHOLD = 0.78
 
 /**
  * Server-level instructions injected into the agent's system prompt by MCP clients.
- * Accurate to the current 11-tool surface — sibling issues append lines here as new tools land.
+ * Accurate to the current 12-tool surface — sibling issues append lines here as new tools land.
  * Keep under ~400 chars; some clients silently trim long instructions.
  */
 export const INSTRUCTIONS =
