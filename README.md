@@ -2,7 +2,7 @@
 
 **Memory for AI agents that lives in plain markdown.**
 
-You read it in Obsidian. Agents read and write it over MCP. Git keeps it in sync.
+You read and write it in Obsidian. Agents read and write it over MCP. Git keeps it in sync.
 No LLM, no cloud, no lock-in — just markdown, an index, and a server.
 
 [![npm](https://img.shields.io/npm/v/@kipachu/omem)](https://www.npmjs.com/package/@kipachu/omem)
@@ -183,70 +183,6 @@ is cloned at boot, served over HTTP, git-synced both ways.
    claude mcp add --transport http omem https://<app>.up.railway.app/mcp \
      --header "Authorization: Bearer $OMEM_HTTP_TOKEN"
    ```
-
-## Code layout
-
-```
-src/
-├── mcp/                       MCP server
-│   ├── server.ts              buildServer + serveMcp/serveHttp + auth
-│   ├── shared.ts              INSTRUCTIONS + withUsage observability + kindSchema
-│   ├── ctx.ts                 ToolCtx + buildToolCtx closure
-│   ├── index.ts               barrel
-│   └── tools/
-│       ├── search.ts          search + recall
-│       ├── write.ts           write + move + archive
-│       ├── ops.ts             sync + usage
-│       └── browse/            get_note + graph + list + recent + status
-├── search.ts                  Hybrid retrieval: FTS5 + vector + graph + RRF
-├── indexer.ts                 Vault → SQLite index
-├── graph.ts                   noteGraph() — neighborhood traversal
-├── status.ts                  vaultStatus() — orientation snapshot
-├── filters.ts                 SQL filter builders
-├── frontmatter.ts             gray-matter wrapper
-├── watcher.ts                 chokidar + embedAll sweep loop
-├── git.ts                     Two-way git sync
-├── embed.ts                   transformers.js ONNX embedder
-├── db.ts                      better-sqlite3 schema + migrations
-├── parser.ts                  markdown → chunks + wikilinks
-├── setup.ts                   omem setup / init / agents
-├── cli.ts                     the `omem` command
-└── config.ts                  stdlib-only env reader
-```
-
-## What just shipped
-
-Eight features landed in the 0.7–0.8 cluster — the project's whole "agents use
-memory as needed" pitch:
-
-- **Server instructions** — agents get a "recall before acting" nudge injected into
-  their system prompt automatically on connect.
-- **Recall** — context-in, relevant-out, grouped by kind. Decisions and conventions
-  surface first; pinned facts rank above logs.
-- **Orientation snapshot** — one call to learn the vault's size, folders, tags, and
-  what's recent.
-- **Graph browsing** — one call returns a note's neighborhood: outgoing/incoming
-  wikilinks, tag neighbors, embedding-similar notes.
-- **Dedup-on-write** — agents see near-duplicate candidates before creating a note,
-  so they append instead of duplicating. `supersedes` archives the old note.
-- **Kind + pinned ranking** — `memory_search` boosts pinned facts and load-bearing
-  kinds (decision, gotcha, convention) so the important stuff floats above logs.
-- **Per-client watermarks** — multi-session agents can ask "what changed since I
-  last looked" and get a focused answer.
-- **Usage observability** — per-tool-call stats on stderr (JSON, scrubbed) + an
-  on-demand aggregate tool.
-
-All eight are on `main` and published to npm (0.7.0).
-
-## Limits + non-goals
-
-- **Polling, not push.** `watch` is a periodic sweep (default 30s). No OS-level file
-  watching hooks.
-- **Single-process counters.** Usage stats are in-memory, process-lifetime.
-- **No cross-vault queries.** One omem = one vault.
-- **No LLM calls in the pipeline.** Extraction, summarization, routing are your
-  problem (or your agent's). omem is storage + retrieval.
-- **No hard delete.** Archiving is the only sanctioned way to retire a note.
 
 ## Related
 
