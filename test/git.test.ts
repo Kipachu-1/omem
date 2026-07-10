@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -217,23 +217,62 @@ test('stale index.lock when process inspection fails: keeps lock and skips', asy
 test('same-vault sync is skipped while another omem sync holds its lease', async () => {
   let release!: () => void
   const held = new Promise<void>(resolve => { release = resolve })
-  const syncA = createGitSync(vaultA, undefined, { beforeReleaseLease: () => held })
-  const first = syncA({ pull: true })
-  for (let i = 0; i < 20 && !existsSync(join(vaultA, '.git/omem-sync.lock')); i++) await new Promise(resolve => setTimeout(resolve, 5))
-  assert.ok(existsSync(join(vaultA, '.git/omem-sync.lock')), 'first sync must hold the vault lease')
-  const second = await createGitSync(vaultA)({ pull: true })
-  assert.equal(second.skipped, 'omem sync held')
+  const first = createGitSync(vaultA, undefined, { beforeReleaseLease: () => held })({ pull: true })
+  for (let i = 0; i < 40; i++) {
+    const second = await createGitSync(vaultA)({ pull: true })
+    if (second.skipped === 'omem sync held') {
+      release()
+      assert.equal((await first).ok, true)
+      const third = await createGitSync(vaultA)({ pull: true })
+      assert.notEqual(third.skipped, 'omem sync held', 'kernel lease must release with the holder')
+      return
+    }
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
   release()
-  assert.equal((await first).ok, true)
-  assert.ok(!existsSync(join(vaultA, '.git/omem-sync.lock')), 'lease must be released after sync')
+  await first
+  assert.fail('first sync never acquired a lease')
+})
+
+test('kernel lease is released after its holder is killed', async () => {
+  const lock = join(vaultA, '.git/omem-sync.lock')
+  const holder = spawn('flock', [lock, 'sh', '-c', 'cat >/dev/null'], { stdio: ['pipe', 'ignore', 'ignore'] })
+  let sawHeld = false
+  for (let i = 0; i < 40; i++) {
+    const r = await createGitSync(vaultA)({ pull: true })
+    if (r.skipped === 'omem sync held') {
+      sawHeld = true
+      break
+    }
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  assert.ok(sawHeld, 'external flock holder must block omem sync')
+  holder.kill('SIGKILL')
+  await new Promise<void>(resolve => holder.once('exit', () => resolve()))
+  const r = await createGitSync(vaultA)({ pull: true })
+  assert.notEqual(r.skipped, 'omem sync held', 'killed holder must free kernel lease')
 })
 
 test('stale index.lock is preserved while another omem sync holds the vault lease', async () => {
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  const first = createGitSync(vaultA, undefined, { beforeReleaseLease: () => held })({ pull: true })
+  let heldLease = false
+  for (let i = 0; i < 40; i++) {
+    const probe = await createGitSync(vaultA)({ pull: true })
+    if (probe.skipped === 'omem sync held') {
+      heldLease = true
+      break
+    }
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  assert.ok(heldLease, 'first sync must hold vault lease')
   const lock = staleLock()
-  mkdirSync(join(vaultA, '.git/omem-sync.lock'))
   const r = await createGitSync(vaultA, undefined, { hasGitProcess: async () => false })({ pull: true })
   assert.equal(r.skipped, 'omem sync held')
   assert.ok(existsSync(lock), 'cleanup must not run without the vault lease')
+  release()
+  await first
 })
 
 test('convergence: interleaved writers on two clones never lose a note', async () => {

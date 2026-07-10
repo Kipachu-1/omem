@@ -1,7 +1,8 @@
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { promisify } from 'node:util'
-import { existsSync, statSync, readFileSync, appendFileSync, mkdirSync, rmdirSync, rmSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { existsSync, statSync, readFileSync, appendFileSync, rmSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 const run = promisify(execFile)
 
@@ -90,15 +91,25 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
     }
   }
 
-  const acquireLease = async (): Promise<(() => void) | null> => {
+  // Kernel-managed advisory lock: flock exits on process death, so SIGKILL cannot strand future sync.
+  const acquireLease = async (): Promise<(() => Promise<void>) | null> => {
     const lock = await gitPath('omem-sync.lock')
-    try {
-      mkdirSync(dirname(lock), { recursive: true })
-      mkdirSync(lock)
-      return () => rmdirSync(lock)
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EEXIST') return null
-      throw e
+    const holder = spawn('flock', ['-n', lock, 'sh', '-c', 'echo acquired >&2; cat >/dev/null'], {
+      stdio: ['pipe', 'ignore', 'pipe'],
+    })
+    const acquired = await new Promise<boolean>(resolve => {
+      let stderr = ''
+      holder.stderr.on('data', chunk => {
+        stderr += chunk
+        if (stderr.includes('acquired')) resolve(true)
+      })
+      holder.once('exit', () => resolve(false))
+      holder.once('error', () => resolve(false))
+    })
+    if (!acquired) return null
+    return async () => {
+      holder.stdin.end()
+      await once(holder, 'exit')
     }
   }
 
@@ -279,7 +290,7 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
       try {
         await deps.beforeReleaseLease?.()
       } finally {
-        releaseLease()
+        await releaseLease()
       }
     }
   }
