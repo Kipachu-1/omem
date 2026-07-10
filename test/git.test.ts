@@ -193,7 +193,7 @@ const staleLock = (): string => {
   return lock
 }
 
-test('stale index.lock without active Git process: removes lock and syncs', async () => {
+test('best-effort stale index.lock without active Git process: removes lock and syncs', async () => {
   const lock = staleLock()
   const r = await createGitSync(vaultA, undefined, { hasGitProcess: async () => false })({ pull: true })
   assert.equal(r.ok, true)
