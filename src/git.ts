@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { existsSync, statSync, readFileSync, appendFileSync, renameSync, rmSync } from 'node:fs'
+import { existsSync, statSync, readFileSync, appendFileSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const run = promisify(execFile)
@@ -140,22 +140,12 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
     }
     const lock = await gitPath('index.lock')
     if (existsSync(lock)) {
-      const before = statSync(lock)
-      const age = Date.now() - before.mtimeMs
+      const age = Date.now() - statSync(lock).mtimeMs
       if (age > STALE_LOCK_MS && !(await gitProcessActive())) {
-        // Atomically rename only the observed lock. A replacement keeps `index.lock`.
-        const quarantine = `${lock}.omem-stale-${process.pid}`
-        try {
-          const current = statSync(lock)
-          if (current.dev === before.dev && current.ino === before.ino && current.mtimeMs === before.mtimeMs && current.size === before.size) {
-            renameSync(lock, quarantine)
-            rmSync(quarantine)
-            console.error(`omem git: removed stale index.lock (${Math.round(age / 60_000)} min old)`)
-            return null
-          }
-        } catch {
-          // The lock changed or vanished while checking; next cycle will re-evaluate.
-        }
+        // Best effort only: an external Git process can still race this cleanup.
+        rmSync(lock, { force: true })
+        console.error(`omem git: removed stale index.lock (${Math.round(age / 60_000)} min old)`)
+        return null
       }
       return 'index.lock held' // another git process; git's own locking keeps things safe
     }
