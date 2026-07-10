@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { existsSync, statSync, readFileSync, appendFileSync } from 'node:fs'
+import { existsSync, statSync, readFileSync, appendFileSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const run = promisify(execFile)
@@ -72,6 +72,15 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
     }
   }
 
+  const hasGitProcess = async (): Promise<boolean> => {
+    try {
+      const { stdout } = await run('ps', ['-eo', 'comm='], { timeout: LOCAL_MS })
+      return stdout.split('\n').some(command => command.trim() === 'git')
+    } catch {
+      return true // unable to inspect processes: preserve the lock
+    }
+  }
+
   const firstLine = (e: unknown): string =>
     String((e as { stderr?: string }).stderr ?? (e as Error).message ?? e).trim().split('\n')[0]
 
@@ -124,8 +133,14 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
     const lock = await gitPath('index.lock')
     if (existsSync(lock)) {
       const age = Date.now() - statSync(lock).mtimeMs
-      if (age > STALE_LOCK_MS)
-        console.error(`omem git: index.lock is ${Math.round(age / 60_000)} min old (${lock}) — remove it if no git process is running`)
+      if (age > STALE_LOCK_MS) {
+        // Git write commands own index.lock; preserve it when any Git process is active.
+        if (!(await hasGitProcess())) {
+          rmSync(lock, { force: true })
+          console.error(`omem git: removed stale index.lock (${Math.round(age / 60_000)} min old)`)
+          return null
+        }
+      }
       return 'index.lock held' // another git process; git's own locking keeps things safe
     }
     if (existsSync(await gitPath('rebase-merge')) || existsSync(await gitPath('rebase-apply'))) {
