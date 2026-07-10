@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { existsSync, statSync, readFileSync, appendFileSync, rmSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { existsSync, statSync, readFileSync, appendFileSync, mkdirSync, rmdirSync, rmSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
 
 const run = promisify(execFile)
 
@@ -47,6 +47,7 @@ export interface GitSyncOpts {
 
 export interface GitSyncDeps {
   hasGitProcess?: () => Promise<boolean>
+  beforeReleaseLease?: () => Promise<void> | void
 }
 
 /** Per-vault sync function with once-per-process state (warnings, hygiene). */
@@ -86,6 +87,18 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
       return await hasGitProcess()
     } catch {
       return true // unable to inspect processes: preserve the lock
+    }
+  }
+
+  const acquireLease = async (): Promise<(() => void) | null> => {
+    const lock = await gitPath('omem-sync.lock')
+    try {
+      mkdirSync(dirname(lock), { recursive: true })
+      mkdirSync(lock)
+      return () => rmdirSync(lock)
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') return null
+      throw e
     }
   }
 
@@ -222,33 +235,52 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
   return async function gitSync(opts: GitSyncOpts = {}): Promise<GitSyncResult> {
     const res: GitSyncResult = { ok: true, committed: 0, pushed: 0, pulled: false }
     const skip = (why: string): GitSyncResult => ((res.skipped = why), res)
-
-    // --- preflight
-    const skipReason = await preflight()
-    if (skipReason) return skip(skipReason)
-
-    // --- once per process: ignore hygiene + untrack the derived index
-    await hygiene()
-
-    // --- commit
-    await commitPhase(res)
-
-    // --- unborn branch / no upstream: local commits are still the backup
-    if (!(await head())) {
-      warnOnce('unborn', 'omem git: branch has no commits yet — running in commit-only mode')
-      return res
+    // Verify Git can resolve this vault before locating its coordination directory.
+    if (!(await tryGit(['rev-parse', '--is-inside-work-tree']))) {
+      warnOnce('norepo', `omem git: ${vault} is not a git repository — sync disabled`)
+      return skip('not a repo')
     }
-    if (!(await tryGit(['rev-parse', '-q', '--verify', '@{u}']))) {
-      warnOnce('noupstream', 'omem git: no upstream configured — commit-only mode (run `git push -u origin <branch>` in the vault to enable push)')
-      return res
+    if (!(await tryGit(['symbolic-ref', '--short', '-q', 'HEAD']))) {
+      warnOnce('detached', 'omem git: detached HEAD — sync disabled until a branch is checked out')
+      return skip('detached HEAD')
     }
+    const releaseLease = await acquireLease()
+    if (!releaseLease) return skip('omem sync held')
 
-    // --- pull
-    if (!(await pullPhase(res, opts))) return res
+    try {
+      // --- preflight
+      const skipReason = await preflight()
+      if (skipReason) return skip(skipReason)
 
-    // --- push
-    await pushPhase(res)
+      // --- once per process: ignore hygiene + untrack the derived index
+      await hygiene()
 
-    return res
+      // --- commit
+      await commitPhase(res)
+
+      // --- unborn branch / no upstream: local commits are still the backup
+      if (!(await head())) {
+        warnOnce('unborn', 'omem git: branch has no commits yet — running in commit-only mode')
+        return res
+      }
+      if (!(await tryGit(['rev-parse', '-q', '--verify', '@{u}']))) {
+        warnOnce('noupstream', 'omem git: no upstream configured — commit-only mode (run `git push -u origin <branch>` in the vault to enable push)')
+        return res
+      }
+
+      // --- pull
+      if (!(await pullPhase(res, opts))) return res
+
+      // --- push
+      await pushPhase(res)
+
+      return res
+    } finally {
+      try {
+        await deps.beforeReleaseLease?.()
+      } finally {
+        releaseLease()
+      }
+    }
   }
 }

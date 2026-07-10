@@ -56,6 +56,7 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 - **Stale Git lock recovery**: `createGitSync()` removes `.git/index.lock` only after it is older than 10 minutes and `ps -eo comm=` finds no active `git` process; if process inspection fails or a process exists, sync skips safely.
 - ~~**Stale-lock race guard**: recovery re-stats the observed lock after process inspection and atomically renames it before deletion; a changed/replaced lock is preserved for the next sync cycle. `GitSyncDeps.hasGitProcess` exists solely for deterministic lock-safety tests.~~ Superseded by OME-27 best-effort recovery.
 - **Stale-lock limitation (OME-27)**: auto-removal is explicitly best-effort: after `ps` reports no Git process, a concurrently starting external Git can still race `rmSync`. Do not claim ownership-safe cleanup without a vault-scoped coordination mechanism; `GitSyncDeps.hasGitProcess` is test-only injection.
+- **Vault Git lease (OME-27 option C)**: each `createGitSync()` cycle owns `.git/omem-sync.lock` (atomic `mkdir`) through preflight, cleanup, commit, pull, and push; a concurrent omem cycle returns `skipped: 'omem sync held'`. The lease coordinates omem writers only, not unrelated Git processes; process inspection remains required for external writers.
 
 ## Commands
 - `npm run typecheck` — tsc --noEmit
