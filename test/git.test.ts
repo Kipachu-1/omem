@@ -185,14 +185,33 @@ test('fresh index.lock: cycle skipped, nothing breaks', async () => {
   assert.equal(r2.ok, true)
 })
 
-test('stale index.lock without active Git process: removes lock and syncs', async () => {
+const staleLock = (): string => {
   const lock = join(vaultA, '.git/index.lock')
   writeFileSync(lock, '')
   const old = new Date(Date.now() - 11 * 60_000)
   utimesSync(lock, old, old)
-  const r = await createGitSync(vaultA)({ pull: true })
+  return lock
+}
+
+test('stale index.lock without active Git process: removes lock and syncs', async () => {
+  const lock = staleLock()
+  const r = await createGitSync(vaultA, undefined, { hasGitProcess: async () => false })({ pull: true })
   assert.equal(r.ok, true)
   assert.ok(!existsSync(lock), 'stale lock must be removed before sync')
+})
+
+test('stale index.lock with active Git process: keeps lock and skips', async () => {
+  const lock = staleLock()
+  const r = await createGitSync(vaultA, undefined, { hasGitProcess: async () => true })({ pull: true })
+  assert.equal(r.skipped, 'index.lock held')
+  assert.ok(existsSync(lock))
+})
+
+test('stale index.lock when process inspection fails: keeps lock and skips', async () => {
+  const lock = staleLock()
+  const r = await createGitSync(vaultA, undefined, { hasGitProcess: async () => { throw new Error('ps unavailable') } })({ pull: true })
+  assert.equal(r.skipped, 'index.lock held')
+  assert.ok(existsSync(lock))
 })
 
 test('convergence: interleaved writers on two clones never lose a note', async () => {

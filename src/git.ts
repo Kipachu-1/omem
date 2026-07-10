@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { existsSync, statSync, readFileSync, appendFileSync, rmSync } from 'node:fs'
+import { existsSync, statSync, readFileSync, appendFileSync, renameSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const run = promisify(execFile)
@@ -45,8 +45,12 @@ export interface GitSyncOpts {
   pull?: boolean
 }
 
+export interface GitSyncDeps {
+  hasGitProcess?: () => Promise<boolean>
+}
+
 /** Per-vault sync function with once-per-process state (warnings, hygiene). */
-export function createGitSync(vault: string, onPulled?: () => void | Promise<void>) {
+export function createGitSync(vault: string, onPulled?: () => void | Promise<void>, deps: GitSyncDeps = {}) {
   const warned = new Set<string>()
   let hygieneDone = false
   let lastConflictSha = ''
@@ -72,10 +76,14 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
     }
   }
 
-  const hasGitProcess = async (): Promise<boolean> => {
+  const hasGitProcess = deps.hasGitProcess ?? (async (): Promise<boolean> => {
+    const { stdout } = await run('ps', ['-eo', 'comm='], { timeout: LOCAL_MS })
+    return stdout.split('\n').some(command => command.trim() === 'git')
+  })
+
+  const gitProcessActive = async (): Promise<boolean> => {
     try {
-      const { stdout } = await run('ps', ['-eo', 'comm='], { timeout: LOCAL_MS })
-      return stdout.split('\n').some(command => command.trim() === 'git')
+      return await hasGitProcess()
     } catch {
       return true // unable to inspect processes: preserve the lock
     }
@@ -132,13 +140,21 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
     }
     const lock = await gitPath('index.lock')
     if (existsSync(lock)) {
-      const age = Date.now() - statSync(lock).mtimeMs
-      if (age > STALE_LOCK_MS) {
-        // Git write commands own index.lock; preserve it when any Git process is active.
-        if (!(await hasGitProcess())) {
-          rmSync(lock, { force: true })
-          console.error(`omem git: removed stale index.lock (${Math.round(age / 60_000)} min old)`)
-          return null
+      const before = statSync(lock)
+      const age = Date.now() - before.mtimeMs
+      if (age > STALE_LOCK_MS && !(await gitProcessActive())) {
+        // Atomically rename only the observed lock. A replacement keeps `index.lock`.
+        const quarantine = `${lock}.omem-stale-${process.pid}`
+        try {
+          const current = statSync(lock)
+          if (current.dev === before.dev && current.ino === before.ino && current.mtimeMs === before.mtimeMs && current.size === before.size) {
+            renameSync(lock, quarantine)
+            rmSync(quarantine)
+            console.error(`omem git: removed stale index.lock (${Math.round(age / 60_000)} min old)`)
+            return null
+          }
+        } catch {
+          // The lock changed or vanished while checking; next cycle will re-evaluate.
         }
       }
       return 'index.lock held' // another git process; git's own locking keeps things safe
