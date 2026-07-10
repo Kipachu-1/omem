@@ -19,7 +19,7 @@
 #     --header "Authorization: Bearer $OMEM_HTTP_TOKEN"
 
 FROM node:22-slim
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates python3 make g++ \
  && rm -rf /var/lib/apt/lists/*
 RUN npm i -g @kipachu/omem@0.7.1
 ENV OMEM_VAULT=/vault OMEM_GIT=1
