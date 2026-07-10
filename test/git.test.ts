@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createGitSync } from '../src/git.ts'
@@ -176,13 +176,23 @@ test('non-repo vault: skips gracefully', async () => {
   assert.equal(r.skipped, 'not a repo')
 })
 
-test('index.lock held: cycle skipped, nothing breaks', async () => {
+test('fresh index.lock: cycle skipped, nothing breaks', async () => {
   writeFileSync(join(vaultA, '.git/index.lock'), '')
   const r = await createGitSync(vaultA)({ pull: true })
   assert.equal(r.skipped, 'index.lock held')
   rmSync(join(vaultA, '.git/index.lock'))
   const r2 = await createGitSync(vaultA)({ pull: true })
   assert.equal(r2.ok, true)
+})
+
+test('stale index.lock without active Git process: removes lock and syncs', async () => {
+  const lock = join(vaultA, '.git/index.lock')
+  writeFileSync(lock, '')
+  const old = new Date(Date.now() - 11 * 60_000)
+  utimesSync(lock, old, old)
+  const r = await createGitSync(vaultA)({ pull: true })
+  assert.equal(r.ok, true)
+  assert.ok(!existsSync(lock), 'stale lock must be removed before sync')
 })
 
 test('convergence: interleaved writers on two clones never lose a note', async () => {

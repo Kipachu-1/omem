@@ -52,6 +52,7 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 - **Git sync phases** (OME-19): `src/git.ts` `createGitSync()` now splits the 99-line `gitSync` into named phases — `preflight()`, `hygiene()`, `commitPhase()`, `pullPhase()`, `pushPhase()` — all closing over the same per-vault state.
 - **Hybrid search fusion**: `src/search.ts` (FTS5 + vector cosine + 1-hop wikilink graph + memory-recency boost, RRF; + pinned/kind ranking boost per OME-14).
 - **Git sync state machine**: `src/git.ts` `createGitSync()` returns a closure with per-vault hygiene (one-shot `.gitignore` + index untracking, stale-lock detection, rebase recovery, conflict-snapshot suppression).
+- **Stale Git lock recovery**: `createGitSync()` removes `.git/index.lock` only after it is older than 10 minutes and `ps -eo comm=` finds no active `git` process; if process inspection fails or a process exists, sync skips safely.
 
 ## Commands
 - `npm run typecheck` — tsc --noEmit
