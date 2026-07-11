@@ -140,6 +140,8 @@ export async function search(db: DB, query: string, opts: SearchOpts = {}): Prom
     }
     if (row.pinned === 1) e.score *= 1.4
     if (row.kind && HIGH_RANK_KINDS.has(row.kind)) e.score *= 1.2
+    // confidence boost (OME-28): trust-weighted retrieval — confidence:1.0 = 1.0×, 0.0 = 0.7×
+    if (row.confidence != null) e.score *= 0.7 + 0.3 * row.confidence
   }
 
   entries.sort((a, b) => b.score - a.score)
@@ -298,13 +300,15 @@ interface ChunkRow {
   mtime: number
   kind: string | null
   pinned: number
+  confidence: number | null
 }
 
 function chunkInfo(db: DB, ids: number[]): Map<number, ChunkRow> {
   if (!ids.length) return new Map()
   const rows = db
     .prepare(
-      `SELECT c.id, c.note_path, c.heading, c.anchor, c.text, n.title, n.mtime, n.kind, n.pinned
+      `SELECT c.id, c.note_path, c.heading, c.anchor, c.text, n.title, n.mtime, n.kind, n.pinned,
+              json_extract(n.frontmatter, '$.confidence') AS confidence
        FROM chunks c JOIN notes n ON n.path = c.note_path
        WHERE c.id IN (${ids.map(() => '?').join(',')})`,
     )

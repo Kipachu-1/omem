@@ -13,8 +13,8 @@ export const DEDUP_THRESHOLD = 0.78
 export const INSTRUCTIONS =
   'Shared Obsidian memory vault via omem. memory_recall before acting (groups by kind, pinned first); ' +
   'memory_search FIRST for prior context. Search before memory_write to avoid duplicates. ' +
-  'memory_get_note for full notes, memory_graph for a note\'s neighborhood, memory_recent (since:lastSeen) ' +
-  'for what changed, memory_list to browse, memory_status for a snapshot. Prefer append mode.'
+  'memory_get_note for full notes, memory_graph for neighborhoods, memory_session_show for session threads. ' +
+  'memory_recent (since:lastSeen) for changes, memory_list to browse, memory_status for a snapshot.'
 
 /** ms-epoch windows for the `since` short forms on memory_recent. */
 export const SINCE_MS: Record<string, number> = { '1h': 3_600_000, '1d': 86_400_000, '7d': 604_800_000 }
