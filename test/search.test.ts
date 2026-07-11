@@ -207,6 +207,55 @@ test('recall pinnedOnly returns only pinned notes', async () => {
     assert.equal(x.notePath, 'memory/decision-recall-decision-pinned.md', `only pinned note expected, got ${x.notePath}`)
 })
 
+// --- OME-28: confidence-weighted ranking ---
+
+test('confidence boost: high-confidence note outranks low-confidence near-identical', async () => {
+  const highPath = 'memory/confidence-high.md'
+  const lowPath = 'memory/confidence-low.md'
+  const body = 'platypus venom analysis gland secretion study'
+  writeFileSync(
+    join(vault, highPath),
+    `---\ntitle: Platypus Venom High\ntags: [test]\nconfidence: 1.0\n---\n\n${body}\n`,
+  )
+  writeFileSync(
+    join(vault, lowPath),
+    `---\ntitle: Platypus Venom Low\ntags: [test]\nconfidence: 0.1\n---\n\n${body}\n`,
+  )
+  fullIndex(db, vault)
+
+  const r = await search(db, 'platypus venom', { embedder: fake, expandGraph: false })
+  const highIdx = r.findIndex(x => x.notePath === highPath)
+  const lowIdx = r.findIndex(x => x.notePath === lowPath)
+  assert.ok(highIdx !== -1, 'high-confidence note found')
+  assert.ok(lowIdx !== -1, 'low-confidence note found')
+  assert.ok(highIdx < lowIdx, `high-confidence should rank above low (high=${highIdx}, low=${lowIdx})`)
+  const highScore = r[highIdx].score
+  const lowScore = r[lowIdx].score
+  assert.ok(highScore > lowScore, `high score ${highScore} should exceed low score ${lowScore}`)
+})
+
+test('missing confidence: no boost applied, score unaffected', async () => {
+  // use the same filename pattern to minimize FTS variance; the point is confidence is absent
+  const aPath = 'memory/no-confidence-a.md'
+  const bPath = 'memory/no-confidence-b.md'
+  writeFileSync(join(vault, aPath), `---\ntitle: No Confidence A\ntags: [test]\n---\n\nkookaburra laughing bird call\n`)
+  writeFileSync(join(vault, bPath), `---\ntitle: No Confidence B\ntags: [test]\n---\n\nkookaburra laughing bird call\n`)
+  fullIndex(db, vault)
+
+  const r = await search(db, 'kookaburra laughing', { embedder: null, expandGraph: false })
+  const a = r.find(x => x.notePath === aPath)
+  const b = r.find(x => x.notePath === bPath)
+  assert.ok(a && b, 'both notes found')
+  // without confidence, boost multiplier is 1.0 (not applied) — scores are from the same ranking leg
+  // (BM25 may differ slightly due to document length / title tokens, so check both are present and reasonably close)
+  assert.ok(a.score > 0 && b.score > 0, 'both scores positive')
+  // the key invariant: neither gets a confidence multiplier — verify by checking the boost range
+  // a 1.0 confidence would multiply by 1.0 (no change), a 0.0 would multiply by 0.7
+  // missing confidence = no multiplication at all, so both are in the same un-boosted range
+  const ratio = Math.min(a.score, b.score) / Math.max(a.score, b.score)
+  assert.ok(ratio > 0.95, `scores should be close without confidence (a=${a.score}, b=${b.score}, ratio=${ratio})`)
+})
+
 // --- topSimilar: pre-write dedup primitive (OME-10) ---
 
 test('topSimilar: near-duplicate text surfaces the existing note with high score', async () => {

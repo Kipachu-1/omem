@@ -11,6 +11,7 @@ import { registerGraph } from './graph.ts'
 import { registerList } from './list.ts'
 import { registerRecent } from './recent.ts'
 import { registerStatus } from './status.ts'
+import { registerSession } from './session.ts'
 
 /** Register all read/browse tools. */
 export function registerBrowseTools(server: McpServer, ctx: ToolCtx): void {
@@ -19,4 +20,5 @@ export function registerBrowseTools(server: McpServer, ctx: ToolCtx): void {
   registerRecent(server, ctx)
   registerList(server, ctx)
   registerStatus(server, ctx)
+  registerSession(server, ctx)
 }
