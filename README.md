@@ -27,7 +27,7 @@ No vault yet? [`template/`](./template) is a ready-to-use starting structure:
 per-domain `islands/`, `inbox/` for triage, `archive/` for superseded notes, and
 [`CONVENTIONS.md`](./template/CONVENTIONS.md) that teaches agents the write rules.
 
-> **npm version:** published latest is 0.7.0 — the full feature set below is live on the registry.
+> **npm version:** published latest is 0.7.2 — the core feature set below is live on the registry.
 
 ## How it works
 
