@@ -15,6 +15,7 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 - 110 tests, ~30s with model cached (OME-12 added per-client watermark: 3 memory_recent since:'lastSeen' tests + 1 resolveHttpClientName unit test). OME-17 added 9 (5 MCP `memory_recall` + 4 search `recall`/`noteMeta`) → 119 total.
 - 127 tests, ~34s with model cached (OME-10 added 8 dedup/supersedes tests incl. partial-failure guard). OME-16 added the `memory_graph` tool + tests → 130 total. OME-15 added 5 `memory_usage`/observability tests (aggregation, error counting, OMEM_USAGE_LOG=off/json stderr) → 132 total. Tool surface is now twelve (added `memory_usage`).
 - 142 tests, ~69s with model cached (OME-28 added 2 confidence-boost tests in search.test.ts + 2 memory_session_show tests in session.test.ts). Tool surface is now thirteen (added `memory_session_show`).
+- 170 tests, ~64s with model cached (OME-31 added 21 repl/ui tests in repl.test.ts + 5 doctor tests in doctor.test.ts). New commands: `omem` (no-args REPL) and `omem doctor`. No new MCP tools.
 
 ## Conventions
 - Version pins: `Dockerfile:24` pins the installed npm package version. When `package.json` version bumps, the Dockerfile pin must be bumped to match (or CI/deploy will lag by one release). The npm registry is the source of truth for available versions.
@@ -61,11 +62,16 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 - **Stale-lock limitation (OME-27)**: auto-removal is explicitly best-effort: after `ps` reports no Git process, a concurrently starting external Git can still race `rmSync`. Do not claim ownership-safe cleanup without a vault-scoped coordination mechanism; `GitSyncDeps.hasGitProcess` is test-only injection.
 - ~~**Vault Git lease (OME-27 option C)**: each `createGitSync()` cycle owns `.git/omem-sync.lock` (atomic `mkdir`) through preflight, cleanup, commit, pull, and push; a concurrent omem cycle returns `skipped: 'omem sync held'`. The lease coordinates omem writers only, not unrelated Git processes; process inspection remains required for external writers.~~ Superseded by crash-safe flock lease.
 - **Crash-safe vault lease (OME-27 option C)**: coordination uses kernel advisory `flock` on `.git/omem-sync.lock` held for the full sync; process death releases automatically; concurrent omem returns `skipped: 'omem sync held'`. Image installs `util-linux`. External Git still requires process inspection.
+- **Interactive REPL (OME-31)**: `omem` with no args (or `omem repl`) drops into `src/repl.ts` `startRepl(db, vault, embedder)` instead of printing USAGE. Bare text → `search()`; slash commands (`/search`, `/recent`, `/status`, `/write`, `/sync`, `/stats`, `/help`, `/quit`) mirror MCP tools with short native names — `helpText()` maps each to its MCP equivalent. Persistent history at `~/.config/omem/history` (best-effort). Piped input (non-TTY) drives the loop without decoration; TTY shows a welcome banner via `vaultStatus()` + colored prompt. `parseSlash()` is a pure exported fn (tested without a TTY). Ctrl-C twice or `/quit` exits.
+- **`omem doctor` (OME-31)**: `src/doctor.ts` — `checkDoctor(vault)` returns a structured `DoctorReport` (pure, no printing); `runDoctor(vault)` prints the colored `✓`/`!`/`✗` report. Checks: vault exists, db opens, git remote, embed model recorded, pending-embedding count, `OMEM_HTTP_TOKEN` set, last-sync age. `getMeta(db, 'last_sync')` is the sync timestamp source (set by git sync).
+- **Did-you-mean (OME-31)**: `src/ui.ts` `suggest(input, list, maxDistance=2)` (Levenshtein) powers unknown-command hints in `cli.ts`. `levenshtein()` and `bar(frac, width)` also exported from `ui.ts`.
 
 ## Commands
 - `npm run typecheck` — tsc --noEmit
 - `npm test` — node --test test/*.test.ts
 - `npm run prepack` — build (tsc -p tsconfig.build.json)
 - `npm view @kipachu/omem@<x.y.z> version` — confirm a version is published to npm
+- `omem` (no args) — interactive REPL (slash commands, bare-text search, persistent history)
+- `omem doctor` — one-command health check (vault, db, git, embeddings, token, sync)
 - `OMEM_USAGE_LOG=off|json|stats` — per-tool-call stderr log mode (default `json`); `memory_usage` MCP tool returns aggregate counts
 
