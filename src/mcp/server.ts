@@ -93,13 +93,17 @@ export async function serveHttp(db: DB, vault: string, embedder: Embedder, port:
     // stateless mode: a fresh server+transport per request, no session bookkeeping to leak
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
     res.on('close', () => void transport.close())
+    // ponytail: the StreamableHTTPServerTransport catches its own errors and writes
+    // JSON-RPC responses (400/405/406), so the catch block below only fires if
+    // buildServer/connect/transport handleRequest itself throws — not reachable via
+    // any normal HTTP method. Not HTTP-testable without dependency injection.
     try {
       const clientName = resolveHttpClientName(req.headers, token)
       await buildServer(db, vault, embedder, () => clientName).connect(transport)
       await transport.handleRequest(req, res)
     } catch (e) {
       console.error('mcp http error:', e)
-      if (!res.headersSent) res.writeHead(500).end()
+      if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'internal error' }))
     }
   }).listen(port, () => {
     console.error(`omem mcp server on http://0.0.0.0:${port} — vault: ${basename(realpathSync.native(resolve(vault)))}`)
