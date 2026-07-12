@@ -11,13 +11,15 @@ import { fullIndex } from './indexer.ts'
 import { localEmbedder, defaultModel } from './embed.ts'
 import { search, type MatchType } from './search.ts'
 import { startWatcher, embedAll } from './watcher.ts'
-import { bold, dim, cyan, green, yellow, magenta, ok, warn, fail, spin } from './ui.ts'
+import { bold, dim, cyan, green, yellow, magenta, ok, warn, fail, spin, suggest } from './ui.ts'
 
 const cmdLine = (name: string, desc: string) => `  ${cyan(name.padEnd(8))} ${desc}`
 const USAGE = `${bold('omem')} — obsidian vault memory index
 
 ${dim('usage:')} omem ${cyan('<command>')} [options]
+       omem ${cyan('(no args)')} drops into the interactive REPL
 
+${cmdLine('(none)', 'interactive REPL — query your vault, slash commands (/help, /search, …)')}
 ${cmdLine('setup', 'interactive setup — writes ~/.config/omem/config.json ' + bold('(start here)'))}
 ${cmdLine('init', 'create a new vault at <path> from the starter template (git init + first commit)')}
 ${cmdLine('index', 'full sync (incremental via content hashes)')}
@@ -25,6 +27,7 @@ ${cmdLine('watch', 'sync, then watch the vault and index changes live ' + dim('[
 ${cmdLine('serve', `watch + MCP server on stdio (the normal run mode; --poll defaults to 30)
            ${dim('--port N serves MCP over HTTP instead; set OMEM_HTTP_TOKEN to require bearer auth')}`)}
 ${cmdLine('search', `query the index:  omem search "how does X work" ${dim('[--json] [--limit N] [--folder F] [--tag T] [--keyword-only] [--after T] [--before T]')}`)}
+${cmdLine('doctor', 'health check — vault, db, git, embeddings, HTTP token, last sync')}
 ${cmdLine('sync', 'git commit + pull + push the vault once (cron-friendly)')}
 ${cmdLine('rebuild', 'drop the index and re-sync from scratch')}
 ${cmdLine('stats', 'note/chunk/edge counts, pending embeddings')}
@@ -38,6 +41,11 @@ ${dim('options:')} --vault <path> (or OMEM_VAULT); db lives at <vault>/.omem/ind
 ${dim('model:')} ${defaultModel()} (or OMEM_EMBED_MODEL)
 
 first time? run: ${cyan('omem setup')}`
+
+const KNOWN_COMMANDS = [
+  'setup', 'init', 'index', 'watch', 'serve', 'search', 'doctor',
+  'sync', 'rebuild', 'stats', 'agents', 'update', 'help',
+]
 
 const { values, positionals } = parseArgs({
   options: {
@@ -135,6 +143,16 @@ function gitPullSec(): number | undefined {
 
 async function main(): Promise<void> {
   switch (cmd) {
+    // no args (or explicit 'repl') → interactive REPL
+    case undefined:
+    case 'repl': {
+      const vault = vaultPath()
+      const db = openDb(dbPath(vault))
+      const { startRepl } = await import('./repl.ts')
+      await startRepl(db, vault, embedder)
+      break
+    }
+
     case 'index': {
       const vault = vaultPath()
       const db = openDb(dbPath(vault))
@@ -342,9 +360,29 @@ async function main(): Promise<void> {
       break
     }
 
+    case 'doctor': {
+      const vault = vaultPath()
+      const { runDoctor } = await import('./doctor.ts')
+      await runDoctor(vault)
+      break
+    }
+
     default:
-      console.log(USAGE)
-      process.exit(cmd ? 1 : 0)
+      if (cmd === 'help') {
+        console.log(USAGE)
+        process.exit(0)
+      }
+      // did-you-mean on an unknown command
+      {
+        const hint = suggest(cmd, KNOWN_COMMANDS, 2)
+        if (hint) {
+          fail(`unknown command "${cmd}" — did you mean "${hint}"?`)
+        } else {
+          fail(`unknown command "${cmd}"`)
+        }
+        console.log(USAGE)
+        process.exit(1)
+      }
   }
 }
 

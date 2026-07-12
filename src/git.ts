@@ -1,8 +1,8 @@
 import { execFile, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { promisify } from 'node:util'
-import { existsSync, statSync, readFileSync, appendFileSync, rmSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { existsSync, statSync, readFileSync, appendFileSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
+import { resolve, join } from 'node:path'
 
 const run = promisify(execFile)
 
@@ -288,6 +288,11 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
       return res
     } finally {
       try {
+        if (res.ok && !res.skipped) {
+          const dir = join(vault, '.omem')
+          try { mkdirSync(dir, { recursive: true }) } catch { /* may already exist */ }
+          writeFileSync(join(dir, 'last_sync'), String(Date.now()))
+        }
         await deps.beforeReleaseLease?.()
       } finally {
         await releaseLease()
