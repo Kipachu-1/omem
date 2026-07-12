@@ -19,7 +19,7 @@ const USAGE = `${bold('omem')} — obsidian vault memory index
 ${dim('usage:')} omem ${cyan('<command>')} [options]
        omem ${cyan('(no args)')} drops into the interactive REPL
 
-${cmdLine('', 'interactive REPL — query your vault, slash commands (/help, /search, …)')}
+${cmdLine('(none)', 'interactive REPL — query your vault, slash commands (/help, /search, …)')}
 ${cmdLine('setup', 'interactive setup — writes ~/.config/omem/config.json ' + bold('(start here)'))}
 ${cmdLine('init', 'create a new vault at <path> from the starter template (git init + first commit)')}
 ${cmdLine('index', 'full sync (incremental via content hashes)')}

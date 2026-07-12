@@ -97,6 +97,19 @@ test('checkDoctor: nonexistent vault', async () => {
   assert.equal(r.vault, false)
   assert.equal(r.db, false)
   assert.equal(r.gitRemote, null)
+  assert.equal(r.lastSync, null, 'no last sync on nonexistent vault')
+})
+
+test('checkDoctor: last_sync reflects .omem/last_sync file written by git sync', async () => {
+  // write a fake last_sync timestamp file (as createGitSync would on success)
+  const { writeFileSync, mkdirSync } = await import('node:fs')
+  mkdirSync(join(vault, '.omem'), { recursive: true })
+  const ts = Date.now()
+  writeFileSync(join(vault, '.omem', 'last_sync'), String(ts))
+
+  const r = await checkDoctor(vault)
+  assert.equal(r.lastSync, ts, 'lastSync should match the .omem/last_sync file')
+  assert.ok(r.lastSyncAge !== null, 'lastSyncAge should be computed')
 })
 
 test('runDoctor: returns the report and exits cleanly on a healthy-ish vault', async () => {

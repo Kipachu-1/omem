@@ -7,14 +7,14 @@
  * testing without a TTY.
  */
 import { createInterface } from 'node:readline/promises'
-import { existsSync, mkdirSync, appendFileSync, readFileSync } from 'node:fs'
+import { mkdirSync, appendFileSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import type { DB } from './db.ts'
 import type { Embedder } from './embed.ts'
 import { search, type SearchResult } from './search.ts'
 import { vaultStatus } from './status.ts'
-import { bold, dim, cyan, green, yellow, magenta, red, ok, warn, spin, bar } from './ui.ts'
+import { bold, dim, cyan, green, yellow, magenta, red, spin, bar } from './ui.ts'
 
 /** Every slash command the REPL knows. Keep names short (human-facing);
  *  the MCP mapping lives in helpText(). */
@@ -28,7 +28,6 @@ export const SLASH_COMMANDS = [
   'help',
   'quit',
 ] as const
-export type SlashCommand = (typeof SLASH_COMMANDS)[number]
 
 export interface ParsedSlash {
   cmd: string
@@ -41,17 +40,6 @@ export function parseSlash(line: string): ParsedSlash {
   if (!trimmed.startsWith('/')) return { cmd: '', args: [trimmed] }
   const parts = trimmed.slice(1).split(/\s+/)
   return { cmd: parts[0] ?? '', args: parts.slice(1) }
-}
-
-const MCP_MAP: Record<string, string> = {
-  search: 'memory_search',
-  recent: 'memory_recent',
-  status: 'memory_status',
-  write: 'memory_write',
-  sync: 'memory_sync',
-  stats: 'memory_recall',
-  help: '—',
-  quit: '—',
 }
 
 /** `/help` output: each slash command + its MCP equivalent + one-liner. */
@@ -143,8 +131,9 @@ export async function startRepl(db: DB, vault: string, embedder: Embedder): Prom
 
   console.error(welcomeBanner(db, vault))
   const rl = createInterface({ input: process.stdin, output: process.stderr })
-  const history = loadHistory()
-  // readline doesn't expose setHistory on the promises interface; we manage our own
+  // load prior history into readline's up-arrow recall (most-recent-first);
+  // the promises Interface doesn't declare .history in its types, but it exists at runtime
+  ;(rl as unknown as { history: string[] }).history.unshift(...loadHistory())
   let sigints = 0
   rl.on('SIGINT', () => {
     sigints++

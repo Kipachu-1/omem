@@ -15,7 +15,7 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 - 110 tests, ~30s with model cached (OME-12 added per-client watermark: 3 memory_recent since:'lastSeen' tests + 1 resolveHttpClientName unit test). OME-17 added 9 (5 MCP `memory_recall` + 4 search `recall`/`noteMeta`) → 119 total.
 - 127 tests, ~34s with model cached (OME-10 added 8 dedup/supersedes tests incl. partial-failure guard). OME-16 added the `memory_graph` tool + tests → 130 total. OME-15 added 5 `memory_usage`/observability tests (aggregation, error counting, OMEM_USAGE_LOG=off/json stderr) → 132 total. Tool surface is now twelve (added `memory_usage`).
 - 142 tests, ~69s with model cached (OME-28 added 2 confidence-boost tests in search.test.ts + 2 memory_session_show tests in session.test.ts). Tool surface is now thirteen (added `memory_session_show`).
-- 170 tests, ~64s with model cached (OME-31 added 21 repl/ui tests in repl.test.ts + 5 doctor tests in doctor.test.ts). New commands: `omem` (no-args REPL) and `omem doctor`. No new MCP tools.
+- 172 tests, ~64s with model cached (OME-31 added 21 repl/ui tests in repl.test.ts + 5 doctor tests in doctor.test.ts + 1 git last_sync test; baseline on main was 144). New commands: `omem` (no-args REPL) and `omem doctor`. No new MCP tools.
 
 ## Conventions
 - Version pins: `Dockerfile:24` pins the installed npm package version. When `package.json` version bumps, the Dockerfile pin must be bumped to match (or CI/deploy will lag by one release). The npm registry is the source of truth for available versions.

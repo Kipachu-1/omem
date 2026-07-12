@@ -58,6 +58,16 @@ test('dirty vault: commits, pushes, adds ignore block', async () => {
   assert.match(readFileSync(join(vaultA, '.gitignore'), 'utf8'), /\.omem\//)
 })
 
+test('successful sync writes .omem/last_sync timestamp', async () => {
+  const before = Date.now()
+  await createGitSync(vaultA)({ pull: true })
+  const f = join(vaultA, '.omem', 'last_sync')
+  assert.ok(existsSync(f), '.omem/last_sync should exist after a successful sync')
+  const ts = parseInt(readFileSync(f, 'utf8'), 10)
+  assert.ok(ts >= before, `last_sync timestamp (${ts}) should be >= sync start (${before})`)
+  assert.ok(ts <= Date.now(), `last_sync timestamp (${ts}) should be <= now (${Date.now()})`)
+})
+
 test('clean vault: no commit, no push, no error', async () => {
   const before = g(origin, 'rev-parse', 'main')
   const sync = createGitSync(vaultA)

@@ -8,12 +8,12 @@
  * `checkDoctor()` is pure (no printing) so tests can assert the shape;
  * `runDoctor()` prints the colored report to stderr and returns the report.
  */
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join } from 'node:path'
 import { openDb, getMeta, type DB } from './db.ts'
-import { bold, dim, green, yellow, red, ok, warn, fail } from './ui.ts'
+import { bold, dim, green, yellow, red, ok, warn } from './ui.ts'
 
 const run = promisify(execFile)
 
@@ -49,12 +49,17 @@ export async function checkDoctor(vault: string): Promise<DoctorReport> {
       pendingEmbeddings = (
         db.prepare('SELECT COUNT(*) AS c FROM chunks WHERE embedding IS NULL').get() as { c: number }
       ).c
-      const ls = getMeta(db, 'last_sync')
-      if (ls) lastSync = parseInt(ls, 10)
     } catch {
       dbOk = false
     } finally {
       db?.close()
+    }
+    // last_sync is a plain file written by createGitSync (not a db meta key)
+    try {
+      const ls = readFileSync(join(vault, '.omem', 'last_sync'), 'utf8')
+      if (ls) lastSync = parseInt(ls, 10)
+    } catch {
+      // no sync yet — lastSync stays null
     }
   }
 
