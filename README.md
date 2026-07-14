@@ -21,13 +21,16 @@ npm i -g @kipachu/omem
 omem init ~/my-vault   # template vault (or point at an existing one)
 omem setup             # wire it up
 omem agents            # register with Claude Code, Cursor, Windsurf, Gemini CLI, …
+
+omem                   # no args → interactive REPL: query the vault, /help for slash commands
+omem doctor            # health check: vault, db, git, embeddings, HTTP token, last sync
 ```
 
 No vault yet? [`template/`](./template) is a ready-to-use starting structure:
 per-domain `islands/`, `inbox/` for triage, `archive/` for superseded notes, and
 [`CONVENTIONS.md`](./template/CONVENTIONS.md) that teaches agents the write rules.
 
-> **npm version:** published latest is 0.7.2 — the core feature set below is live on the registry.
+> **npm version:** published latest is 0.8.1 — the core feature set below is live on the registry.
 
 ## How it works
 
