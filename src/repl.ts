@@ -14,6 +14,8 @@ import type { DB } from './db.ts'
 import type { Embedder } from './embed.ts'
 import { search, type SearchResult } from './search.ts'
 import { vaultStatus } from './status.ts'
+import { buildToolCtx, type ToolCtx } from './mcp/ctx.ts'
+import { writeNote } from './mcp/tools/write.ts'
 import { bold, dim, cyan, green, yellow, magenta, red, spin, bar } from './ui.ts'
 
 /** Every slash command the REPL knows. Keep names short (human-facing);
@@ -118,11 +120,14 @@ function renderResults(results: SearchResult[]): string {
 }
 
 export async function startRepl(db: DB, vault: string, embedder: Embedder): Promise<void> {
+  const ctx = buildToolCtx(db, vault, embedder, () => 'repl')
+
   if (!process.stdin.isTTY) {
-    // piped/scripted input: drive the loop but don't decorate (no prompt, no history)
+    // piped/scripted input: drive the loop but don't decorate (no prompt, no history).
+    // No `ask` — /write needs an interactive body prompt, so it degrades gracefully here.
     const rl = createInterface({ input: process.stdin, output: process.stderr })
     for await (const line of rl) {
-      const out = await handleLine(line, db, vault, embedder)
+      const out = await handleLine(line, ctx)
       if (out === '__QUIT__') break
       if (out !== null) console.error(out)
     }
@@ -131,6 +136,8 @@ export async function startRepl(db: DB, vault: string, embedder: Embedder): Prom
 
   console.error(welcomeBanner(db, vault))
   const rl = createInterface({ input: process.stdin, output: process.stderr })
+  // follow-up prompt used by /write to read the note body on a second line
+  const ask = (q: string): Promise<string> => rl.question(q)
   // load prior history into readline's up-arrow recall (most-recent-first);
   // the promises Interface doesn't declare .history in its types, but it exists at runtime
   ;(rl as unknown as { history: string[] }).history.unshift(...loadHistory())
@@ -163,7 +170,7 @@ export async function startRepl(db: DB, vault: string, embedder: Embedder): Prom
       continue
     }
     appendHistory(line.trim())
-    const out = await handleLine(line, db, vault, embedder)
+    const out = await handleLine(line, ctx, ask)
     if (out === '__QUIT__') {
       break
     }
@@ -175,10 +182,10 @@ export async function startRepl(db: DB, vault: string, embedder: Embedder): Prom
 
 async function handleLine(
   line: string,
-  db: DB,
-  vault: string,
-  embedder: Embedder,
+  ctx: ToolCtx,
+  ask?: (q: string) => Promise<string>,
 ): Promise<string | null> {
+  const { db, vault, embedder } = ctx
   const { cmd, args } = parseSlash(line)
   // bare text → search
   if (!cmd) {
@@ -216,10 +223,27 @@ async function handleLine(
         .filter(Boolean)
         .join('\n')
     }
-    case 'write':
-      return dim(
-        'writing from the REPL is not wired yet — use the MCP memory_write tool or your editor + omem watch.',
-      )
+    case 'write': {
+      if (!ask)
+        return dim('writing needs an interactive terminal — use the memory_write MCP tool for scripted writes.')
+      const title = args.join(' ').trim().replace(/^["']|["']$/g, '').trim()
+      if (!title) return dim('usage: /write <title>   then type the note body at the prompt')
+      const body = (await ask(`  ${dim('body ›')} `)).trim()
+      if (!body) return dim('write cancelled (empty body)')
+      try {
+        const sp = spin(`writing "${title}"`)
+        const r = await writeNote(ctx, { title, content: body })
+        sp.done()
+        const lines = [`${green('✓ wrote')} ${bold(r.path)}`, `  ${dim(r.link)}`]
+        if (r.similarExisting?.length) {
+          lines.push(yellow(`  ${r.similarExisting.length} similar note(s) already exist — consider appending:`))
+          for (const s of r.similarExisting) lines.push(`    ${dim(s.score.toFixed(3))} ${s.path}`)
+        }
+        return lines.join('\n')
+      } catch (e) {
+        return `✗ write failed: ${(e as Error).message}`
+      }
+    }
     case 'sync': {
       try {
         const { createGitSync } = await import('./git.ts')
