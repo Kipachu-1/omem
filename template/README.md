@@ -15,7 +15,8 @@ vault/
 ├── islands/
 │   ├── example-project/       # one folder per knowledge domain ("island")
 │   ├── user-me/               # your preferences, style, decisions
-│   └── shared-conventions/    # cross-island facts every agent must know
+│   ├── shared-conventions/    # cross-island facts every agent must know
+│   └── docs-*/                # external knowledge researched via memory_learn
 ├── inbox/                     # untriaged notes — move to an island once placed
 ├── memory/                    # omem's default write folder — treat as inbox, triage it
 └── archive/                   # superseded notes (via memory_archive; never deleted)
@@ -23,7 +24,11 @@ vault/
 
 An **island** = a scoped knowledge domain — a project, a person, a team. Every note
 belongs to exactly one island (set in frontmatter). Adding an island = new folder +
-a README stating its tag prefix and who writes there. Rename `example-project` and
+a README stating its tag prefix and who writes there. `docs-<name>` islands are the
+exception you don't hand-make: `memory_learn` scaffolds one, then an agent researches the
+topic with its own web tools and fills it in over as many runs as the topic needs. An island
+has no size limit — once a subtopic outgrows a flat folder it gets its own subfolder and a
+`README.md` indexing it, nested as deep as the material warrants. Rename `example-project` and
 `user-me` to fit; the structure is the template, not the names.
 
 ## Getting started

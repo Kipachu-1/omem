@@ -7,14 +7,15 @@ export const DEDUP_THRESHOLD = 0.78
 
 /**
  * Server-level instructions injected into the agent's system prompt by MCP clients.
- * Accurate to the current 12-tool surface — sibling issues append lines here as new tools land.
+ * Accurate to the current 14-tool surface — sibling issues append lines here as new tools land.
  * Keep under ~400 chars; some clients silently trim long instructions.
  */
 export const INSTRUCTIONS =
-  'Shared Obsidian memory vault via omem. memory_recall before acting (groups by kind, pinned first); ' +
+  'Shared Obsidian memory vault via omem. memory_recall before acting (kind-grouped, pinned first); ' +
   'memory_search FIRST for prior context. Search before memory_write to avoid duplicates. ' +
-  'memory_get_note for full notes, memory_graph for neighborhoods, memory_session_show for session threads. ' +
-  'memory_recent (since:lastSeen) for changes, memory_list to browse, memory_status for a snapshot.'
+  'memory_learn researches a new topic into a docs island. ' +
+  'memory_get_note, memory_graph, memory_session_show, memory_list and memory_status browse; ' +
+  'memory_recent (since:lastSeen) for changes.'
 
 /** ms-epoch windows for the `since` short forms on memory_recent. */
 export const SINCE_MS: Record<string, number> = { '1h': 3_600_000, '1d': 86_400_000, '7d': 604_800_000 }

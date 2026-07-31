@@ -31,6 +31,22 @@ export interface WriteResult {
 }
 
 /**
+ * Filename-safe slug: lowercase, non-alphanumeric runs collapsed to `-`, capped at 60.
+ * Drops `/`, `.` and every other separator, so a slug can never widen a path.
+ * Shared by the note-filename builder and `memory_learn`'s island name.
+ * Trim runs AFTER the cap — slicing mid-run would otherwise re-introduce a trailing `-`.
+ */
+export function slugify(s: string): string {
+  return (
+    s
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, '-')
+      .slice(0, 60)
+      .replace(/^-+|-+$/g, '') || 'note'
+  )
+}
+
+/**
  * Core write logic shared by the `memory_write` MCP tool and the REPL `/write`.
  * Creates memory/YYYY-MM-DD-<slug>.md by default; overwrite/append target an
  * existing `path`. Returns the written path, dedup candidates, and any archived
@@ -44,12 +60,7 @@ export async function writeNote(ctx: ToolCtx, a: WriteArgs): Promise<WriteResult
 
   if (mode === 'create') {
     const folder = (a.folder ?? 'memory').replace(/\/+$/, '')
-    const slug =
-      a.title
-        .toLowerCase()
-        .replace(/[^\p{L}\p{N}]+/gu, '-')
-        .replace(/^-+|-+$/g, '')
-        .slice(0, 60) || 'note'
+    const slug = slugify(a.title)
     const date = new Date().toISOString().slice(0, 10)
     let candidate = `${folder}/${date}-${slug}.md`
     for (let n = 2; existsSync(safeRel(candidate).abs); n++) candidate = `${folder}/${date}-${slug}-${n}.md`

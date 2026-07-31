@@ -10,6 +10,7 @@ import { buildToolCtx } from './ctx.ts'
 import { registerSearchTools } from './tools/search.ts'
 import { registerBrowseTools } from './tools/browse/index.ts'
 import { registerWriteTools } from './tools/write.ts'
+import { registerLearnTools } from './tools/learn.ts'
 import { registerOpsTools } from './tools/ops.ts'
 
 /**
@@ -52,6 +53,7 @@ export function buildServer(
   registerSearchTools(server, ctx)
   registerBrowseTools(server, ctx)
   registerWriteTools(server, ctx)
+  registerLearnTools(server, ctx)
   registerOpsTools(server, ctx)
   return server
 }
