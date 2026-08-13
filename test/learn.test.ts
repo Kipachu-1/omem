@@ -42,6 +42,9 @@ test('isInternalTopic rejects issue ids, this session, and team lore', () => {
   assert.equal(isInternalTopic('session/ome-36'), true)
   assert.equal(isInternalTopic('React Router v7'), false)
   assert.equal(isInternalTopic('RFC 8297'), false)
+  assert.equal(isInternalTopic('UTF-8'), false)
+  assert.equal(isInternalTopic('SHA-256'), false)
+  assert.equal(isInternalTopic('ISO-8601'), false)
 })
 
 test('decideLearn stays incomplete until the cited-note bar', () => {

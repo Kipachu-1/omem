@@ -53,7 +53,8 @@ export interface LearnResult {
  */
 export function isInternalTopic(raw: string): boolean {
   const t = inert(raw)
-  if (/\b[A-Z]{2,5}-\d+\b/.test(t)) return true
+  // Known Linear team keys only — a generic [A-Z]{2,5}-\d+ also matches UTF-8 / SHA-256 / ISO-8601.
+  if (/\b(OME|YAG|AGE|CAS|ALI)-\d+\b/.test(t)) return true
   if (/\bthis (session|project|team|ticket|issue|repo|codebase)\b/i.test(t)) return true
   if (/\bour (team|project|codebase|repo)\b/i.test(t)) return true
   if (/\bsession\/[a-z0-9._-]+/i.test(t)) return true
@@ -421,7 +422,7 @@ export function registerLearnTools(server: McpServer, ctx: ToolCtx): void {
         'Externally documented subjects only — anything you learned from this project, this team or this ' +
         'session has no public source to cite, so write it with memory_write instead. ' +
         'It creates islands/docs-<slug>/ with a hub note and lists what the island already holds. ' +
-        'status is ready only after the hub plus at least 3 cited fact notes exist; otherwise incomplete. ' +
+        'status is ready only after the hub plus at least 3 notes with source_url exist; otherwise incomplete. ' +
         'Internal topics (issue IDs, this session, team lore) return status rejected.',
       inputSchema: {
         topic: z.string().min(1).describe("what to learn, e.g. 'React Router v7'"),
