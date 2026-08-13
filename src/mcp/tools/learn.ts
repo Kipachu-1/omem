@@ -26,13 +26,92 @@ export interface Coverage {
   newest?: string
 }
 
+export type LearnStatus = 'incomplete' | 'ready' | 'rejected'
+
+/** Cited notes required before status flips to ready (hub never counts). */
+export const READY_CITED_NOTES = 3
+
 export interface LearnResult {
+  status: LearnStatus
+  nextAction: string
+  outline: string[]
+  rules: string[]
+  island?: string
+  hub?: string
+  link?: string
+  coverage?: Coverage
+  recent?: { path: string; title: string }[]
+  playbook?: string
+  /** set when status is rejected */
+  use?: 'memory_write'
+  reason?: string
+}
+
+/**
+ * memory_learn is for externally documented subjects only. Issue IDs, "this session",
+ * and team/project lore have no public source to cite — those belong on memory_write.
+ */
+export function isInternalTopic(raw: string): boolean {
+  const t = inert(raw)
+  if (/\b[A-Z]{2,5}-\d+\b/.test(t)) return true
+  if (/\bthis (session|project|team|ticket|issue|repo|codebase)\b/i.test(t)) return true
+  if (/\bour (team|project|codebase|repo)\b/i.test(t)) return true
+  if (/\bsession\/[a-z0-9._-]+/i.test(t)) return true
+  return false
+}
+
+const DEFAULT_OUTLINE = [
+  'What it is, when to reach for it, and when not to',
+  'The mental model / core concepts',
+  'The API or CLI surface an agent will actually call',
+  'Configuration and defaults that bite',
+  'Gotchas, footguns, common error messages and their fix',
+  'Version differences and migration notes',
+  'Canonical links (docs home, changelog, repository)',
+]
+
+const DEFAULT_RULES = [
+  'omem does not fetch. Use your own web search and fetch tools.',
+  'One fact per note. No source → no note.',
+  'Write each finding with memory_write into the island folder.',
+  'Do not claim the topic is learned until status is ready.',
+]
+
+/** Pure: status + single next step from coverage. Hub-only islands stay incomplete. */
+export function decideLearn(a: {
+  topic: string
   island: string
-  hub: string
-  link: string
   coverage: Coverage
-  recent: { path: string; title: string }[]
-  playbook: string
+  cited: number
+}): Pick<LearnResult, 'status' | 'nextAction' | 'outline' | 'rules'> {
+  const topic = inertProse(a.topic) || 'the topic'
+  const rules = [
+    ...DEFAULT_RULES.slice(0, 2),
+    `Write each finding with memory_write into ${a.island}.`,
+    DEFAULT_RULES[3],
+  ]
+  if (a.cited >= READY_CITED_NOTES) {
+    return {
+      status: 'ready',
+      nextAction: `memory_list folder:${a.island} — island is ready; fill remaining outline gaps if any`,
+      outline: DEFAULT_OUTLINE,
+      rules,
+    }
+  }
+  if (a.coverage.notes === 0) {
+    return {
+      status: 'incomplete',
+      nextAction: `web_search official documentation for ${topic}`,
+      outline: DEFAULT_OUTLINE,
+      rules,
+    }
+  }
+  return {
+    status: 'incomplete',
+    nextAction: `memory_write a cited fact into ${a.island} (${a.cited}/${READY_CITED_NOTES} cited notes; need source_url)`,
+    outline: DEFAULT_OUTLINE,
+    rules,
+  }
 }
 
 /**
@@ -333,16 +412,17 @@ export function registerLearnTools(server: McpServer, ctx: ToolCtx): void {
   server.registerTool(
     'memory_learn',
     {
-      title: 'Research a topic into a knowledge island',
+      title: 'Start researching a topic into a knowledge island',
       description:
+        'Does not fetch. Returns a playbook. You must search + write findings with memory_write. ' +
         'Research an external topic into the vault: a library, framework, API, protocol, standard or product. ' +
         'Call it when asked to "learn", "research", "read the docs for", "index" or "remember everything about" ' +
         'something the vault does not cover yet. ' +
         'Externally documented subjects only — anything you learned from this project, this team or this ' +
         'session has no public source to cite, so write it with memory_write instead. ' +
         'It creates islands/docs-<slug>/ with a hub note and lists what the island already holds. ' +
-        'It returns a research playbook. omem never fetches anything — you do the research with your own ' +
-        'web search and fetch tools, then write each finding back with memory_write.',
+        'status is ready only after the hub plus at least 3 cited fact notes exist; otherwise incomplete. ' +
+        'Internal topics (issue IDs, this session, team lore) return status rejected.',
       inputSchema: {
         topic: z.string().min(1).describe("what to learn, e.g. 'React Router v7'"),
         focus: z
@@ -354,6 +434,18 @@ export function registerLearnTools(server: McpServer, ctx: ToolCtx): void {
     },
     async a =>
       withUsage('memory_learn', a, async () => {
+        if (isInternalTopic(a.topic)) {
+          return json({
+            status: 'rejected',
+            nextAction: 'memory_write the finding into the right project island',
+            outline: [],
+            rules: DEFAULT_RULES,
+            use: 'memory_write',
+            reason:
+              'memory_learn is for externally documented subjects only. Issue IDs, this session, and team/project lore have no public source to cite.',
+          } satisfies LearnResult)
+        }
+
         // The caller's topic reaches the hub note on disk, where a forged heading would be
         // indexed and embedded permanently. Flatten it once, here, and use only this form —
         // including for the ownership comparison, so it matches what was written.
@@ -524,7 +616,19 @@ export function registerLearnTools(server: McpServer, ctx: ToolCtx): void {
           await indexNow(hub.rel)
         }
 
+        const cited = (
+          db
+            .prepare(
+              `SELECT COUNT(*) AS n FROM notes
+                WHERE path LIKE ? ESCAPE '\\' AND ${NOT_HUB}
+                  AND json_extract(frontmatter, '$.source_url') IS NOT NULL`,
+            )
+            .get(...scope) as { n: number }
+        ).n
+        const decided = decideLearn({ topic, island, coverage, cited })
+
         const result: LearnResult = {
+          ...decided,
           island,
           hub: hub.rel,
           link: deepLink(hub.rel),

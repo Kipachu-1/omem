@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildPlaybook } from '../src/mcp/tools/learn.ts'
+import { buildPlaybook, decideLearn, isInternalTopic, READY_CITED_NOTES } from '../src/mcp/tools/learn.ts'
 import type { Coverage } from '../src/mcp/tools/learn.ts'
 import { slugify } from '../src/mcp/tools/write.ts'
 
@@ -32,6 +32,35 @@ test('slugify keeps two long topics sharing a 58-char prefix distinct', () => {
   assert.ok(a.length <= 60 && b.length <= 60)
   // and the prefixed island names stay distinct too, which is what learn.ts actually uses
   assert.notEqual(`docs-${a}`, `docs-${b}`)
+})
+
+test('isInternalTopic rejects issue ids, this session, and team lore', () => {
+  assert.equal(isInternalTopic('OME-36'), true)
+  assert.equal(isInternalTopic('please review YAG-52'), true)
+  assert.equal(isInternalTopic('this session'), true)
+  assert.equal(isInternalTopic('our team conventions'), true)
+  assert.equal(isInternalTopic('session/ome-36'), true)
+  assert.equal(isInternalTopic('React Router v7'), false)
+  assert.equal(isInternalTopic('RFC 8297'), false)
+})
+
+test('decideLearn stays incomplete until the cited-note bar', () => {
+  const island = 'islands/docs-react-router-v7'
+  const empty = decideLearn({ topic: 'React Router v7', island, coverage: EMPTY, cited: 0 })
+  assert.equal(empty.status, 'incomplete')
+  assert.match(empty.nextAction, /web_search/)
+  assert.ok(empty.outline.length >= 3)
+  assert.ok(empty.rules.some(r => /does not fetch/i.test(r)))
+
+  const uncited: Coverage = { notes: 2, byFolder: { '': 2 }, bySubtopic: {}, byKind: { fact: 2 }, sourceVersions: [], sourceVersionCount: 0 }
+  const mid = decideLearn({ topic: 'React Router v7', island, coverage: uncited, cited: 0 })
+  assert.equal(mid.status, 'incomplete')
+  assert.match(mid.nextAction, /memory_write/)
+  assert.match(mid.nextAction, /0\/3/)
+
+  const ready = decideLearn({ topic: 'React Router v7', island, coverage: { ...uncited, notes: READY_CITED_NOTES }, cited: READY_CITED_NOTES })
+  assert.equal(ready.status, 'ready')
+  assert.match(ready.nextAction, /memory_list/)
 })
 
 test('buildPlaybook targets the island and demands provenance', () => {

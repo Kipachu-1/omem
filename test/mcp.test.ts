@@ -55,6 +55,7 @@ test('server advertises memory-usage instructions', async () => {
   assert.equal(typeof instructions, 'string')
   assert.ok(instructions!.length > 0, 'instructions must be non-empty')
   assert.ok(instructions!.includes('memory_search'), 'instructions must nudge memory_search')
+  assert.ok(instructions!.includes('memory_learn starts research'), 'learn is start, not finish')
   assert.ok(instructions!.length <= 400, `instructions must stay under ~400 chars (got ${instructions!.length})`)
 })
 
@@ -717,6 +718,10 @@ test('memory_learn scaffolds a docs island, then reports its notes without clobb
 
   assert.equal(first.island, 'islands/docs-react-router-v7')
   assert.equal(first.hub, 'islands/docs-react-router-v7/README.md')
+  assert.equal(first.status, 'incomplete', 'a hub-only island is not learned')
+  assert.match(first.nextAction, /web_search/)
+  assert.ok(Array.isArray(first.outline) && first.outline.length >= 3)
+  assert.ok(first.rules.some((r: string) => /does not fetch/i.test(r)))
   assert.equal(first.coverage.notes, 0, 'a fresh island starts empty')
   assert.ok(existsSync(join(vault, first.hub)), 'hub README must be created on disk')
   assert.match(first.playbook, /islands\/docs-react-router-v7/, 'playbook targets the island')
@@ -747,6 +752,8 @@ test('memory_learn scaffolds a docs island, then reports its notes without clobb
 
   const second = await call('memory_learn', { topic: 'React Router v7' })
   assert.equal(second.coverage.notes, 1, 'the hub is excluded, the researched note is counted')
+  assert.equal(second.status, 'incomplete', 'one uncited note is still not ready')
+  assert.match(second.nextAction, /memory_write/)
   assert.ok(
     !second.recent.some((n: { path: string }) => n.path === first.hub),
     'the hub must be excluded from its own island sample',
@@ -835,6 +842,39 @@ test('a topic containing markdown cannot forge a heading in the playbook or the 
   const headings = (hub.content.match(/^#+ .*/gm) ?? []) as string[]
   assert.equal(headings.length, 1, 'the hub body must hold exactly one heading')
   assert.doesNotMatch(hub.content, /^\s*##\s*9\./m, 'no forged heading written to disk')
+})
+
+test('memory_learn rejects internal topics without scaffolding an island', async () => {
+  const r = await call('memory_learn', { topic: 'OME-36' })
+  assert.equal(r.status, 'rejected')
+  assert.equal(r.use, 'memory_write')
+  assert.match(r.reason, /externally documented/)
+  assert.match(r.nextAction, /memory_write/)
+  assert.equal(r.island, undefined)
+  assert.ok(!existsSync(join(vault, 'islands/docs-ome-36/README.md')))
+
+  const session = await call('memory_learn', { topic: 'this session' })
+  assert.equal(session.status, 'rejected')
+})
+
+test('memory_learn is ready only after three cited notes', async () => {
+  const l = await call('memory_learn', { topic: 'Cited Ready Topic' })
+  assert.equal(l.status, 'incomplete')
+
+  for (const title of ['Cited fact one', 'Cited fact two', 'Cited fact three']) {
+    await call('memory_write', {
+      title,
+      content: `${title} body from official docs.`,
+      folder: l.island,
+      kind: 'fact',
+      frontmatter: { source_url: 'https://example.com/docs', source_version: '1.0' },
+    })
+  }
+
+  const ready = await call('memory_learn', { topic: 'Cited Ready Topic' })
+  assert.equal(ready.coverage.notes, 3)
+  assert.equal(ready.status, 'ready')
+  assert.match(ready.nextAction, /memory_list/)
 })
 
 test('memory_learn slugs away path separators', async () => {
