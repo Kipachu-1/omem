@@ -11,11 +11,9 @@ export const DEDUP_THRESHOLD = 0.78
  * Keep under ~400 chars; some clients silently trim long instructions.
  */
 export const INSTRUCTIONS =
-  'Shared Obsidian memory vault via omem. memory_recall before acting (kind-grouped, pinned first); ' +
-  'memory_search FIRST for prior context. Search before memory_write to avoid duplicates. ' +
-  'memory_learn researches a new topic into a docs island. ' +
-  'memory_get_note, memory_graph, memory_session_show, memory_list and memory_status browse; ' +
-  'memory_recent (since:lastSeen) for changes.'
+  'Shared Obsidian vault. memory_recall before acting; memory_search FIRST for prior context. ' +
+  'Search before memory_write. memory_learn starts research — write each cited finding back before claiming learned. ' +
+  'memory_get_note/graph/session_show/list/status browse; memory_recent (since:lastSeen) for changes.'
 
 /** ms-epoch windows for the `since` short forms on memory_recent. */
 export const SINCE_MS: Record<string, number> = { '1h': 3_600_000, '1d': 86_400_000, '7d': 604_800_000 }
