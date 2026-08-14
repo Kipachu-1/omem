@@ -155,6 +155,7 @@ export function decideLearn(a: {
       exampleWriteCall,
     }
   }
+  const remaining = READY_CITED_NOTES - a.cited
   return {
     status: 'incomplete',
     nextAction: `memory_write a cited fact into ${a.island} (${a.cited}/${READY_CITED_NOTES} cited notes; need source_url)`,
@@ -162,7 +163,7 @@ export function decideLearn(a: {
     rules,
     checklist: [
       `1. Research remaining gaps in official documentation for ${topic}.`,
-      `2. Write ${READY_CITED_NOTES - a.cited} more cited fact notes with memory_write into ${a.island} (currently ${a.cited}/${READY_CITED_NOTES}).`,
+      `2. Write ${remaining} more cited fact ${remaining === 1 ? 'note' : 'notes'} with memory_write into ${a.island} (currently ${a.cited}/${READY_CITED_NOTES}).`,
       `3. Call memory_learn again to verify status flips to "ready".`,
       `4. Overwrite ${a.island}/README.md with a concise index of created notes.`,
     ],

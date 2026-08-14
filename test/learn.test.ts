@@ -67,11 +67,16 @@ test('decideLearn stays incomplete until the cited-note bar', () => {
   assert.equal(mid.checklist?.length, 4)
   assert.match(mid.checklist![1], /Write 3 more cited fact notes/)
 
+  const almostReady = decideLearn({ topic: 'React Router v7', island, coverage: uncited, cited: 2 })
+  assert.equal(almostReady.status, 'incomplete')
+  assert.match(almostReady.checklist![1], /Write 1 more cited fact note with/)
+
   const ready = decideLearn({ topic: 'React Router v7', island, coverage: { ...uncited, notes: READY_CITED_NOTES }, cited: READY_CITED_NOTES })
   assert.equal(ready.status, 'ready')
   assert.match(ready.nextAction, /memory_list/)
   assert.equal(ready.checklist?.length, 4)
   assert.match(ready.checklist![0], /Island is ready with 3 cited notes/)
+  assert.equal(ready.exampleWriteCall?.folder, island)
 })
 
 test('buildPlaybook targets the island and demands provenance', () => {
