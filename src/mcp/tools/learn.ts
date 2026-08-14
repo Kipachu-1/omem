@@ -31,11 +31,28 @@ export type LearnStatus = 'incomplete' | 'ready' | 'rejected'
 /** Cited notes required before status flips to ready (hub never counts). */
 export const READY_CITED_NOTES = 3
 
+export interface ExampleWriteCall {
+  folder: string
+  title: string
+  kind: 'fact' | 'gotcha' | 'convention' | 'decision'
+  tags: string[]
+  frontmatter: {
+    island: string
+    pinned: boolean
+    source_url: string
+    source_version: string
+    confidence: number
+  }
+  content: string
+}
+
 export interface LearnResult {
   status: LearnStatus
   nextAction: string
   outline: string[]
   rules: string[]
+  checklist?: string[]
+  exampleWriteCall?: ExampleWriteCall
   island?: string
   hub?: string
   link?: string
@@ -84,19 +101,43 @@ export function decideLearn(a: {
   island: string
   coverage: Coverage
   cited: number
-}): Pick<LearnResult, 'status' | 'nextAction' | 'outline' | 'rules'> {
+}): Pick<LearnResult, 'status' | 'nextAction' | 'outline' | 'rules' | 'checklist' | 'exampleWriteCall'> {
   const topic = inertProse(a.topic) || 'the topic'
+  const tag = a.island.split('/').at(-1) ?? a.island
   const rules = [
     ...DEFAULT_RULES.slice(0, 2),
     `Write each finding with memory_write into ${a.island}.`,
     DEFAULT_RULES[3],
   ]
+
+  const exampleWriteCall: ExampleWriteCall = {
+    folder: a.island,
+    title: `<searchable question about ${topic}>`,
+    kind: 'fact',
+    tags: [`${tag}/core`],
+    frontmatter: {
+      island: tag,
+      pinned: false,
+      source_url: 'https://...',
+      source_version: 'latest',
+      confidence: 1.0,
+    },
+    content: '<first sentence answers title>. <quote/code block>. <source link>',
+  }
+
   if (a.cited >= READY_CITED_NOTES) {
     return {
       status: 'ready',
       nextAction: `memory_list folder:${a.island} — island is ready; fill remaining outline gaps if any`,
       outline: DEFAULT_OUTLINE,
       rules,
+      checklist: [
+        `1. Island is ready with ${a.cited} cited notes.`,
+        `2. (Optional) Run memory_list folder:${a.island} to inspect coverage.`,
+        `3. (Optional) Fill any remaining outline gaps using memory_write.`,
+        `4. Update hub index at ${a.island}/README.md if new notes were added.`,
+      ],
+      exampleWriteCall,
     }
   }
   if (a.coverage.notes === 0) {
@@ -105,6 +146,13 @@ export function decideLearn(a: {
       nextAction: `web_search official documentation for ${topic}`,
       outline: DEFAULT_OUTLINE,
       rules,
+      checklist: [
+        `1. web_search official documentation and API references for ${topic}.`,
+        `2. Write at least ${READY_CITED_NOTES} distinct fact notes with memory_write into ${a.island} (must include source_url).`,
+        `3. Call memory_learn again to verify status flips to "ready".`,
+        `4. Overwrite ${a.island}/README.md with a concise index of created notes.`,
+      ],
+      exampleWriteCall,
     }
   }
   return {
@@ -112,6 +160,13 @@ export function decideLearn(a: {
     nextAction: `memory_write a cited fact into ${a.island} (${a.cited}/${READY_CITED_NOTES} cited notes; need source_url)`,
     outline: DEFAULT_OUTLINE,
     rules,
+    checklist: [
+      `1. Research remaining gaps in official documentation for ${topic}.`,
+      `2. Write ${READY_CITED_NOTES - a.cited} more cited fact notes with memory_write into ${a.island} (currently ${a.cited}/${READY_CITED_NOTES}).`,
+      `3. Call memory_learn again to verify status flips to "ready".`,
+      `4. Overwrite ${a.island}/README.md with a concise index of created notes.`,
+    ],
+    exampleWriteCall,
   }
 }
 
