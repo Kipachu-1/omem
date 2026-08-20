@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // plain-JS shim: friendly version gate (the entrypoint itself would die cryptically),
 // then run built JS when present (published package) or raw TS (repo checkout).
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
 /**
@@ -19,9 +19,18 @@ const usingDist = existsSync(dist)
 const needed = usingDist ? [20, 0] : [23, 6]
 
 // only run the CLI when invoked as the entrypoint; a test importing this module
-// for meetsRequirement must not drag in the whole CLI
-const invokedAsMain =
-  import.meta.url === (process.argv[1] ? pathToFileURL(process.argv[1]).href : undefined)
+// for meetsRequirement must not drag in the whole CLI.
+// npm installs global bins as SYMLINKS (argv[1] = the link) while Node's ESM loader
+// resolves import.meta.url to the realpath — compare realpaths or the CLI silently
+// no-ops (exit 0, no output) on the one layout every published install uses.
+const invokedAsMain = (() => {
+  if (!process.argv[1]) return false
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
+  } catch {
+    return false // argv[1] unreadable: assume we are not the entrypoint
+  }
+})()
 
 if (invokedAsMain) {
   if (!meetsRequirement(process.versions.node, needed)) {
