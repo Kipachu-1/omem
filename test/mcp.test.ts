@@ -59,6 +59,13 @@ test('server advertises memory-usage instructions', async () => {
   assert.ok(instructions!.length <= 400, `instructions must stay under ~400 chars (got ${instructions!.length})`)
 })
 
+test('server advertises the package version', async () => {
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as { version: string }
+  const v = client.getServerVersion()
+  assert.ok(v, 'server must report a version')
+  assert.equal(v!.version, pkg.version, 'advertised version must match package.json')
+})
+
 test('exposes exactly the fourteen memory tools', async () => {
   const { tools } = await client.listTools()
   assert.deepEqual(

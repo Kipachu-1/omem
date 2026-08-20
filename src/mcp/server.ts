@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { basename, resolve } from 'node:path'
-import { realpathSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { DB } from '../db.ts'
@@ -41,6 +42,14 @@ export function resolveHttpClientName(
   return 'default'
 }
 
+// the advertised server version is the package version — same depth (2 levels) in both
+// src/mcp/server.ts and the built dist/mcp/server.js, so this URL resolves in either layout
+const pkgVersion = (
+  JSON.parse(readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf8')) as {
+    version: string
+  }
+).version
+
 /** Build a fresh McpServer with all memory tools registered (db/embedder are shared). */
 export function buildServer(
   db: DB,
@@ -49,7 +58,7 @@ export function buildServer(
   getClientName: () => string = stdioClientName,
 ): McpServer {
   const ctx = buildToolCtx(db, vault, embedder, getClientName)
-  const server = new McpServer({ name: 'omem', version: '0.1.0' }, { instructions: INSTRUCTIONS })
+  const server = new McpServer({ name: 'omem', version: pkgVersion }, { instructions: INSTRUCTIONS })
   registerSearchTools(server, ctx)
   registerBrowseTools(server, ctx)
   registerWriteTools(server, ctx)

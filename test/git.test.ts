@@ -224,24 +224,39 @@ test('stale index.lock when process inspection fails: keeps lock and skips', asy
   assert.ok(existsSync(lock))
 })
 
-test('same-vault sync is skipped while another omem sync holds its lease', async () => {
+// Park a sync inside its lease deterministically: beforeReleaseLease fires only after the
+// lease is acquired AND every phase (preflight, hygiene, commit, pull, push) has finished,
+// so awaiting `parked` removes every timing race the old poll-loop version had — the parked
+// sync can no longer remove a stale index.lock the test creates "after" it.
+const parkedSync = (vault: string) => {
+  let parkedResolve!: () => void
+  const parked = new Promise<void>(r => { parkedResolve = r })
   let release!: () => void
-  const held = new Promise<void>(resolve => { release = resolve })
-  const first = createGitSync(vaultA, undefined, { beforeReleaseLease: () => held })({ pull: true })
-  for (let i = 0; i < 40; i++) {
+  const held = new Promise<void>(r => { release = r })
+  const first = createGitSync(vault, undefined, {
+    beforeReleaseLease: async () => { parkedResolve(); await held },
+  })({ pull: true })
+  // if first returns without ever parking (e.g. a skip path), fail fast instead of hanging
+  const parkedOrBail = Promise.race([
+    parked,
+    first.then(r => { throw new Error(`first never parked (skipped: ${r.skipped ?? 'none'})`) }),
+  ])
+  return { first, parkedOrBail, release }
+}
+
+test('same-vault sync is skipped while another omem sync holds its lease', async () => {
+  const { first, parkedOrBail, release } = parkedSync(vaultA)
+  try {
+    await parkedOrBail
     const second = await createGitSync(vaultA)({ pull: true })
-    if (second.skipped === 'omem sync held') {
-      release()
-      assert.equal((await first).ok, true)
-      const third = await createGitSync(vaultA)({ pull: true })
-      assert.notEqual(third.skipped, 'omem sync held', 'kernel lease must release with the holder')
-      return
-    }
-    await new Promise(resolve => setTimeout(resolve, 5))
+    assert.equal(second.skipped, 'omem sync held')
+  } finally {
+    release()
+    await first.catch(() => undefined)
   }
-  release()
-  await first
-  assert.fail('first sync never acquired a lease')
+  assert.equal((await first).ok, true)
+  const third = await createGitSync(vaultA)({ pull: true })
+  assert.notEqual(third.skipped, 'omem sync held', 'kernel lease must release with the holder')
 })
 
 test('kernel lease is released after its holder is killed', async () => {
@@ -264,25 +279,17 @@ test('kernel lease is released after its holder is killed', async () => {
 })
 
 test('stale index.lock is preserved while another omem sync holds the vault lease', async () => {
-  let release!: () => void
-  const held = new Promise<void>(resolve => { release = resolve })
-  const first = createGitSync(vaultA, undefined, { beforeReleaseLease: () => held })({ pull: true })
-  let heldLease = false
-  for (let i = 0; i < 40; i++) {
-    const probe = await createGitSync(vaultA)({ pull: true })
-    if (probe.skipped === 'omem sync held') {
-      heldLease = true
-      break
-    }
-    await new Promise(resolve => setTimeout(resolve, 5))
+  const { first, parkedOrBail, release } = parkedSync(vaultA)
+  try {
+    await parkedOrBail // first holds the lease and has finished preflight: it can no longer touch the lock
+    const lock = staleLock()
+    const r = await createGitSync(vaultA, undefined, { hasGitProcess: async () => false })({ pull: true })
+    assert.equal(r.skipped, 'omem sync held')
+    assert.ok(existsSync(lock), 'cleanup must not run without the vault lease')
+  } finally {
+    release()
+    await first.catch(() => undefined)
   }
-  assert.ok(heldLease, 'first sync must hold vault lease')
-  const lock = staleLock()
-  const r = await createGitSync(vaultA, undefined, { hasGitProcess: async () => false })({ pull: true })
-  assert.equal(r.skipped, 'omem sync held')
-  assert.ok(existsSync(lock), 'cleanup must not run without the vault lease')
-  release()
-  await first
 })
 
 test('convergence: interleaved writers on two clones never lose a note', async () => {

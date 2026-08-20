@@ -152,16 +152,11 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
     return resolve(vault, out)
   }
 
-  /** preflight: repo exists, not detached, no stale lock, recover interrupted rebase. Returns skip reason or null. */
+  /** preflight: stale-lock removal and interrupted-rebase recovery. Returns skip reason or null.
+   *  Repo-exists and detached-HEAD run in gitSync() BEFORE the lease is acquired —
+   *  acquireLease() shells out to `git rev-parse --git-path` and would throw (not skip)
+   *  outside a repo. No reason to repeat them here inside the lease. */
   async function preflight(): Promise<string | null> {
-    if (!(await tryGit(['rev-parse', '--is-inside-work-tree']))) {
-      warnOnce('norepo', `omem git: ${vault} is not a git repository — sync disabled`)
-      return 'not a repo'
-    }
-    if (!(await tryGit(['symbolic-ref', '--short', '-q', 'HEAD']))) {
-      warnOnce('detached', 'omem git: detached HEAD — sync disabled until a branch is checked out')
-      return 'detached HEAD'
-    }
     const lock = await gitPath('index.lock')
     if (existsSync(lock)) {
       const age = Date.now() - statSync(lock).mtimeMs
