@@ -92,3 +92,15 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 - `omem doctor` — one-command health check (vault, db, git, embeddings, token, sync)
 - `OMEM_USAGE_LOG=off|json|stats` — per-tool-call stderr log mode (default `json`); `memory_usage` MCP tool returns aggregate counts
 
+
+## Test (OME-39 corrections + additions)
+- 205 tests total now (bin.test.ts + server-version test added): on Linux ALL 205 pass including `test/git.test.ts` (20/20) — the "17 git-test failures" note above is macOS-only (`flock` absent on darwin). Verify with `npm test` on Linux/CI; use the grep-excluding variant on macOS.
+
+## Gotchas (OME-39)
+- `omem doctor`'s last-sync check reads the `.omem/last_sync` **file** (written by git sync), not a db meta key — the earlier `getMeta(db, 'last_sync')` wording above is wrong.
+- `bin/omem.mjs` version gate: published package needs Node >= 20, a repo checkout (raw TS) needs >= 23.6. The compare is `meetsRequirement(version, [major, minor])` (exported, unit-tested in `test/bin.test.ts`) — do NOT reintroduce `Math.ceil(minor)`; it rejected every 23.x while the message said ">= 23.6". The CLI import is behind an invoked-as-main guard so tests can import the module without booting the CLI.
+- MCP server version is read from `package.json` at module load (`src/mcp/server.ts`) — the URL is exactly 2 levels up in both `src/` and `dist/` layouts; keep both trees at equal depth or the read breaks.
+- `npm audit fix` (OME-39) brought transitive deps (hono, fast-uri, ip-address, @hono/node-server — all under `@modelcontextprotocol/sdk`) up to patched versions: 9 vulns → 2. The remaining 2 are `sharp` (libvips CVEs) via `@huggingface/transformers`, no fix available upstream and unused by omem's text-only embeddings.
+- `preflight()` in `src/git.ts` handles stale-lock + rebase recovery only; the repo-exists / detached-HEAD checks live in `gitSync()` before the flock lease is acquired (acquireLease would throw outside a repo instead of skipping). Don't move them back — that was the duplication OME-39 removed.
+
+- The two vault-lease tests ("same-vault sync is skipped…", "stale index.lock is preserved…") were timing-flaky on main (~30% of full-file runs): a poll loop raced `first`'s acquireLease against probe syncs, and created the stale index.lock while `first` could still be mid-preflight — so `first` itself sometimes removed it. Fixed (OME-39) with the `parkedSync()` helper: `beforeReleaseLease` fires only after the lease is held AND all phases finished, so `await parkedOrBail` parks the holder deterministically. Do NOT reintroduce poll loops that race a sync's internal phases; park via `beforeReleaseLease` instead.

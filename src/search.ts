@@ -366,22 +366,20 @@ export async function topSimilar(
     .all() as { note_path: string; heading: string | null; embedding: Buffer }[]
   if (!rows.length) return []
   const best = new Map<string, { score: number; heading: string | null }>()
-  const titles = new Map<string, string>()
   for (const r of rows) {
     const score = dot(queryVec, bufToVec(r.embedding))
     const prev = best.get(r.note_path)
-    if (!prev || score > prev.score) {
-      best.set(r.note_path, { score, heading: r.heading })
-      // heading may be null; title resolved later from notes join
-      titles.set(r.note_path, '')
-    }
+    if (!prev || score > prev.score) best.set(r.note_path, { score, heading: r.heading })
   }
-  if (titles.size) {
-    const titleRows = db
-      .prepare(`SELECT path, title FROM notes WHERE path IN (${[...titles.keys()].map(() => '?').join(',')})`)
-      .all(...titles.keys()) as { path: string; title: string }[]
-    for (const r of titleRows) titles.set(r.path, r.title)
-  }
+  if (!best.size) return []
+  const paths = [...best.keys()]
+  const titles = new Map<string, string>(
+    (
+      db
+        .prepare(`SELECT path, title FROM notes WHERE path IN (${paths.map(() => '?').join(',')})`)
+        .all(...paths) as { path: string; title: string }[]
+    ).map(r => [r.path, r.title]),
+  )
   return [...best.entries()]
     .map(([note_path, v]) => ({ note_path, title: titles.get(note_path) ?? '', heading: v.heading, score: v.score }))
     .sort((a, b) => b.score - a.score)

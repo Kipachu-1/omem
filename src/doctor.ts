@@ -69,7 +69,7 @@ export async function checkDoctor(vault: string): Promise<DoctorReport> {
       gitRemote = (await run('git', ['-C', vault, 'remote', 'get-url', 'origin']).then(r => r.stdout.trim())).replace(
         /\.git$/,
         '',
-      ) ?? null
+      )
     } catch {
       gitRemote = null
     }
