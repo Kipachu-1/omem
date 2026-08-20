@@ -90,11 +90,13 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 - `npm view @kipachu/omem@<x.y.z> version` — confirm a version is published to npm
 - `omem` (no args) — interactive REPL (slash commands, bare-text search, persistent history)
 - `omem doctor` — one-command health check (vault, db, git, embeddings, token, sync)
+- `omem agents [--yes] [--json]` — registration-status aware: skips agents whose config already has omem; `--yes` registers every detected+unregistered agent without prompts (safe non-TTY); `--json` prints all known agents with detected/state/config (stdout, machine-readable); bare non-TTY prints one state line per detected agent
 - `OMEM_USAGE_LOG=off|json|stats` — per-tool-call stderr log mode (default `json`); `memory_usage` MCP tool returns aggregate counts
 
 
 ## Test (OME-39 corrections + additions)
 - 205 tests total now (bin.test.ts + server-version test added): on Linux ALL 205 pass including `test/git.test.ts` (20/20) — the "17 git-test failures" note above is macOS-only (`flock` absent on darwin). Verify with `npm test` on Linux/CI; use the grep-excluding variant on macOS.
+- 212 tests (OME-40 added 6 in `test/agents.test.ts`: jsonRegistered states, tomlRegistered states, offerAgents skip/prompt/--yes/decline paths, mcpJsonAgent wiring). All pass on Linux.
 
 ## Gotchas (OME-39)
 - `omem doctor`'s last-sync check reads the `.omem/last_sync` **file** (written by git sync), not a db meta key — the earlier `getMeta(db, 'last_sync')` wording above is wrong.
@@ -105,3 +107,6 @@ Repo knowledge for `@kipachu/omem` (Obsidian-vault-first memory server for AI ag
 
 - The two vault-lease tests ("same-vault sync is skipped…", "stale index.lock is preserved…") were timing-flaky on main (~30% of full-file runs): a poll loop raced `first`'s acquireLease against probe syncs, and created the stale index.lock while `first` could still be mid-preflight — so `first` itself sometimes removed it. Fixed (OME-39) with the `parkedSync()` helper: `beforeReleaseLease` fires only after the lease is held AND all phases finished, so `await parkedOrBail` parks the holder deterministically. Do NOT reintroduce poll loops that race a sync's internal phases; park via `beforeReleaseLease` instead.
 - `bin/omem.mjs` invoked-as-main guard: compare `import.meta.url` against `pathToFileURL(realpathSync(process.argv[1]))`, NOT raw `argv[1]` — npm global bins are symlinks, so argv[1] is the link while import.meta.url is the realpath, and a raw compare makes the published `omem` command silently no-op (exit 0, no output). Pinned by the symlink test in `test/bin.test.ts`.
+
+## Architecture (OME-40)
+- **`omem agents` registration-state (OME-40)**: `src/agents.ts` — `jsonRegistered(path, get)` / `tomlRegistered(path)` are pure state checks (no file or absent entry → `missing`, entry/section present → `registered`, unparseable JSON → `unknown`); `omemAt(...keys)` deep-picks the cfg leaf. `Agent` gained optional `config` (informational file path) + `state()`; `mcpJsonAgent(path)` wires config/state/register to one path for the standard-mcpServers agents (Cursor, Windsurf, Gemini, pi, Claude Desktop); opencode probes `mcp.omem`, Claude Code probes `~/.claude.json` (user scope), Codex probes the TOML section. VS Code registers via `code --add-mcp` which has no cheap file probe → state stays `unknown` (still offered). `agentsStatus()` maps every known agent; `offerAgents(yes, found?)` takes an injectable found-list (tests) and skips `state() === 'registered'` agents without prompting — `omem setup` shares that skip.
