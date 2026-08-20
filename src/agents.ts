@@ -10,14 +10,58 @@ const home = (...p: string[]) => join(homedir(), ...p)
 const hasBin = (bin: string): Promise<boolean> =>
   run(process.platform === 'win32' ? 'where' : 'which', [bin]).then(() => true).catch(() => false)
 
+export type AgentState = 'registered' | 'missing' | 'unknown'
+
 export interface Agent {
   name: string
   /** detected when the binary is on PATH or the config dir exists */
   bin?: string
   dir?: string
+  /** config file omem would be registered in (informational) */
+  config?: string
+  /** cheap registration check; undefined when there is no config-file probe */
+  state?: () => AgentState
   /** registers omem and returns where it was written */
   register: (serveCmd: string[]) => Promise<string>
   note?: string
+}
+
+/** deep-pick a cfg object at keys, true when the leaf exists (omem entry present) */
+const omemAt =
+  (...keys: string[]) =>
+  (cfg: Record<string, unknown>): boolean => {
+    let cur: unknown = cfg
+    for (const k of keys) {
+      if (!cur || typeof cur !== 'object') return false
+      cur = (cur as Record<string, unknown>)[k]
+    }
+    return cur !== undefined
+  }
+
+/** pure: JSON config state — no file or absent entry → missing, unparseable → unknown */
+export function jsonRegistered(path: string, get: (cfg: Record<string, unknown>) => boolean): AgentState {
+  if (!existsSync(path)) return 'missing'
+  let cfg: Record<string, unknown>
+  try {
+    cfg = JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return 'unknown'
+  }
+  if (!cfg || typeof cfg !== 'object') return 'unknown'
+  return get(cfg) ? 'registered' : 'missing'
+}
+
+// ponytail: append-only TOML — no parser dep; idempotence via a plain-text section check
+const omemTomlSection = (s: string): boolean => /^\[mcp_servers\.omem\]/m.test(s)
+
+/** pure: TOML config state for the codex-style [mcp_servers.omem] section */
+export function tomlRegistered(path: string): AgentState {
+  if (!existsSync(path)) return 'missing'
+  try {
+    return omemTomlSection(readFileSync(path, 'utf8')) ? 'registered' : 'missing'
+  } catch {
+    return 'unknown'
+  }
 }
 
 /** merge into the de-facto standard { mcpServers: { name: { command, args } } } shape */
@@ -31,11 +75,17 @@ export const mcpJson =
     return path
   }
 
-// ponytail: append-only TOML — no parser dep; idempotence via a plain-text section check
+/** an agent registered via the standard mcpServers JSON shape — config, state, register wired to one path */
+const mcpJsonAgent = (path: string): Pick<Agent, 'config' | 'state' | 'register'> => ({
+  config: path,
+  state: () => jsonRegistered(path, omemAt('mcpServers', 'omem')),
+  register: mcpJson(path),
+})
+
 const codexToml = async (cmd: string[]): Promise<string> => {
   const path = home('.codex', 'config.toml')
   const cur = existsSync(path) ? readFileSync(path, 'utf8') : ''
-  if (/^\[mcp_servers\.omem\]/m.test(cur)) return `${path} (already registered)`
+  if (tomlRegistered(path) === 'registered') return `${path} (already registered)`
   mkdirSync(dirname(path), { recursive: true })
   appendFileSync(
     path,
@@ -58,6 +108,9 @@ export const AGENTS: Agent[] = [
     name: 'Claude Code',
     bin: 'claude',
     dir: home('.claude'),
+    // user scope (what `claude mcp add -s user` writes) lives in ~/.claude.json
+    config: home('.claude.json'),
+    state: () => jsonRegistered(home('.claude.json'), omemAt('mcpServers', 'omem')),
     register: async cmd => {
       // `claude` may be off PATH (VS Code launched from the Dock, extension-only install):
       // fall back to writing the same user-scope config the CLI would
@@ -67,27 +120,42 @@ export const AGENTS: Agent[] = [
       return 'user scope (restart sessions to pick it up)'
     },
   },
-  { name: 'Codex CLI', bin: 'codex', dir: home('.codex'), register: codexToml },
+  {
+    name: 'Codex CLI',
+    bin: 'codex',
+    dir: home('.codex'),
+    config: home('.codex', 'config.toml'),
+    state: () => tomlRegistered(home('.codex', 'config.toml')),
+    register: codexToml,
+  },
   {
     name: 'pi',
     bin: 'pi',
     dir: home('.pi'),
-    register: mcpJson(home('.pi', 'agent', 'mcp.json')),
     note: 'pi needs the pi-mcp-adapter extension to load MCP servers',
+    ...mcpJsonAgent(home('.pi', 'agent', 'mcp.json')),
   },
-  { name: 'Cursor', dir: home('.cursor'), register: mcpJson(home('.cursor', 'mcp.json')) },
-  { name: 'Windsurf', dir: home('.codeium', 'windsurf'), register: mcpJson(home('.codeium', 'windsurf', 'mcp_config.json')) },
-  { name: 'Gemini CLI', bin: 'gemini', dir: home('.gemini'), register: mcpJson(home('.gemini', 'settings.json')) },
-  { name: 'opencode', bin: 'opencode', dir: home('.config', 'opencode'), register: opencodeJson },
+  { name: 'Cursor', dir: home('.cursor'), ...mcpJsonAgent(home('.cursor', 'mcp.json')) },
+  { name: 'Windsurf', dir: home('.codeium', 'windsurf'), ...mcpJsonAgent(home('.codeium', 'windsurf', 'mcp_config.json')) },
+  { name: 'Gemini CLI', bin: 'gemini', dir: home('.gemini'), ...mcpJsonAgent(home('.gemini', 'settings.json')) },
+  {
+    name: 'opencode',
+    bin: 'opencode',
+    dir: home('.config', 'opencode'),
+    config: home('.config', 'opencode', 'opencode.json'),
+    state: () => jsonRegistered(home('.config', 'opencode', 'opencode.json'), omemAt('mcp', 'omem')),
+    register: opencodeJson,
+  },
   {
     name: 'Claude Desktop',
     dir: join(homedir(), 'Library', 'Application Support', 'Claude'),
-    register: mcpJson(join(homedir(), 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json')),
     note: 'restart the app to pick it up',
+    ...mcpJsonAgent(join(homedir(), 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json')),
   },
   {
     name: 'VS Code',
     bin: 'code',
+    // no cheap config-file probe — `code --add-mcp` writes into its own storage; state stays unknown
     register: async cmd => {
       await run('code', ['--add-mcp', JSON.stringify({ name: 'omem', command: cmd[0], args: cmd.slice(1) })])
       return 'via code --add-mcp'
@@ -107,16 +175,33 @@ export async function detectAgents(): Promise<Agent[]> {
   return AGENTS.filter((_, i) => flags[i])
 }
 
-/** Detect installed agents and offer to register the MCP server in each. */
-export async function offerAgents(yes: (q: string) => Promise<boolean>): Promise<void> {
+export interface AgentStatus {
+  name: string
+  detected: boolean
+  state: AgentState
+  config?: string
+}
+
+/** every known agent with its detected flag and registration state */
+export async function agentsStatus(): Promise<AgentStatus[]> {
   const found = await detectAgents()
-  if (!found.length) {
+  return AGENTS.map(a => ({ name: a.name, detected: found.includes(a), state: a.state?.() ?? 'unknown', config: a.config }))
+}
+
+/** Detect installed agents and offer to register the MCP server in each (already-registered ones are skipped). */
+export async function offerAgents(yes: (q: string) => Promise<boolean>, found?: Agent[]): Promise<void> {
+  const list = found ?? (await detectAgents())
+  if (!list.length) {
     console.error(dim('no known agent tools detected — register manually with: <agent> mcp add omem -- omem serve'))
     return
   }
   const cmd = await serveCmd()
-  console.error(`detected: ${found.map(a => a.name).join(', ')}`)
-  for (const a of found) {
+  console.error(`detected: ${list.map(a => a.name).join(', ')}`)
+  for (const a of list) {
+    if (a.state?.() === 'registered') {
+      console.error(dim(`  ${a.name}: already registered, skipping`))
+      continue
+    }
     if (!(await yes(`  register omem MCP in ${a.name}?`))) continue
     try {
       ok(`${a.name}: ${await a.register(cmd)}${a.note ? dim(` — ${a.note}`) : ''}`)

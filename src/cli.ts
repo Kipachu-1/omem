@@ -31,7 +31,7 @@ ${cmdLine('doctor', 'health check — vault, db, git, embeddings, HTTP token, la
 ${cmdLine('sync', 'git commit + pull + push the vault once (cron-friendly)')}
 ${cmdLine('rebuild', 'drop the index and re-sync from scratch')}
 ${cmdLine('stats', 'note/chunk/edge counts, pending embeddings')}
-${cmdLine('agents', 'detect installed agent tools (Claude Code, Codex, pi, Cursor, …) and register the MCP server')}
+${cmdLine('agents', 'detect installed agent tools (Claude Code, Codex, pi, Cursor, …) and register the MCP server ' + dim('[--yes: no prompts] [--json: status report]'))}
 ${cmdLine('update', 'self-update to the latest npm release')}
 
 ${dim('git:')} --git (or OMEM_GIT=1) on watch/serve auto-commits+pushes dirty ticks and pulls
@@ -61,6 +61,7 @@ const { values, positionals } = parseArgs({
     port: { type: 'string' },
     git: { type: 'boolean' },
     'git-pull-interval': { type: 'string' },
+    yes: { type: 'boolean' },
   },
   allowPositionals: true,
 })
@@ -297,11 +298,29 @@ async function main(): Promise<void> {
     }
 
     case 'agents': {
-      const { offerAgents, detectAgents } = await import('./agents.ts')
+      const { offerAgents, detectAgents, agentsStatus } = await import('./agents.ts')
+      if (values.json) {
+        console.log(JSON.stringify(await agentsStatus(), null, 2))
+        break
+      }
+      if (values.yes) {
+        // non-interactive: register every detected agent that isn't already registered
+        await offerAgents(async () => true)
+        break
+      }
       if (!process.stdin.isTTY) {
-        // piped/scripted: just report what's detected
+        // piped/scripted: report what's detected and whether omem is registered
         const found = await detectAgents()
-        console.log(found.length ? found.map(a => a.name).join('\n') : 'none detected')
+        if (!found.length) {
+          console.log('none detected')
+          break
+        }
+        for (const a of found) {
+          const st = a.state?.() ?? 'unknown'
+          const label =
+            st === 'registered' ? green('registered') : st === 'missing' ? yellow('not registered') : dim('unknown')
+          console.log(`${a.name} ${label}${a.config ? dim(` — ${a.config}`) : ''}`)
+        }
         break
       }
       const { createInterface } = await import('node:readline/promises')
