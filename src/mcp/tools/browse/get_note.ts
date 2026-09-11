@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { noteHash } from '../../../note-write.ts'
 import { existsSync, readFileSync } from 'node:fs'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { parseFrontmatter } from '../../../frontmatter.ts'
@@ -28,7 +29,11 @@ export function registerGetNote(server: McpServer, ctx: ToolCtx): void {
             .prepare("SELECT DISTINCT src_path FROM edges WHERE dst = ? AND type = 'wikilink' AND resolved = 1")
             .all(rel) as { src_path: string }[]
         ).map(r => r.src_path)
-        return json({ path: rel, frontmatter, content, backlinks, link: deepLink(rel) })
+        return json({ path: rel, hash: noteHash(raw), frontmatter, content, backlinks,
+          history: {
+            supersedes: Array.isArray(frontmatter.supersedes) ? frontmatter.supersedes : [],
+            supersededBy: typeof frontmatter.superseded_by === 'string' ? frontmatter.superseded_by : null,
+          }, link: deepLink(rel) })
       }),
   )
 }

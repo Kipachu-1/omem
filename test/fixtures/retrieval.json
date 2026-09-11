@@ -1,0 +1,10 @@
+[
+  {"id":"leases","query":"How do vault sync leases recover after a crash?","answer":"Vault sync leases use a kernel lock. When a sync process crashes, the kernel releases its lease automatically. Another process can acquire the lock without deleting a stale lock directory."},
+  {"id":"tokens","query":"Where should Git authentication tokens be passed?","answer":"Pass Git authentication tokens through a credential helper environment variable. Never put a token in process arguments or persist a token in the remote URL."},
+  {"id":"models","query":"What must happen when the embedding model changes?","answer":"Rebuild the index when the embedding model changes. Mixing embeddings from different models gives meaningless similarity scores; incremental embedding refuses a model mismatch."},
+  {"id":"links","query":"How do forward wikilinks resolve missing targets?","answer":"Forward wikilinks remain unresolved until their target note exists. Indexing the missing target resolves those links, so notes can be written in outline order."},
+  {"id":"citations","query":"What citation metadata belongs on research notes?","answer":"Each research note needs citation metadata with the exact source URL and a specific version or retrieval date. A valid URL does not prove that the source supports the claim."},
+  {"id":"themes","query":"Where do shared mobile components get theme variables?","answer":"Shared mobile components inherit theme variables from their nearest themed ancestor. Ensure that the theme selector covers the provider that owns the shared component."},
+  {"id":"deploy","query":"Which package version does the Docker deployment install?","answer":"The Docker deployment installs the published npm package version pinned in its Dockerfile. The repository working tree is not the image source of truth; publish and update the pin together."},
+  {"id":"resume","query":"How should hidden tabs handle streaming render work?","answer":"Hidden tabs should pause derived streaming render work and use a stable structural fingerprint. Resume work when the tab becomes visible, while keeping the transport state intact."}
+]

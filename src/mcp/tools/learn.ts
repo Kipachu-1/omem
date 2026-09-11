@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { validCitation } from '../../quality.ts'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -28,7 +29,7 @@ export interface Coverage {
 
 export type LearnStatus = 'incomplete' | 'ready' | 'rejected'
 
-/** Cited notes required before status flips to ready (hub never counts). */
+/** Minimum evidence floor; scope and hub checks must also pass before readiness. */
 export const READY_CITED_NOTES = 3
 
 export interface ExampleWriteCall {
@@ -49,6 +50,11 @@ export interface ExampleWriteCall {
 export interface LearnResult {
   status: LearnStatus
   nextAction: string
+  evidenceStatus?: 'missing' | 'minimum-present'
+  scopeStatus?: 'unreviewed' | 'gaps' | 'recorded-complete'
+  blockers?: string[]
+  unansweredQuestions?: string[]
+  assessment?: string
   outline: string[]
   rules: string[]
   checklist?: string[]
@@ -95,13 +101,16 @@ const DEFAULT_RULES = [
   'Do not claim the topic is learned until status is ready.',
 ]
 
-/** Pure: status + single next step from coverage. Hub-only islands stay incomplete. */
+/** Pure readiness diagnostics from citation counts and the agent-supplied scope plan. */
 export function decideLearn(a: {
   topic: string
   island: string
   coverage: Coverage
   cited: number
-}): Pick<LearnResult, 'status' | 'nextAction' | 'outline' | 'rules' | 'checklist' | 'exampleWriteCall'> {
+  questions?: { question: string; answered: boolean }[]
+  scopeMatches?: boolean
+  hubComplete?: boolean
+}): Pick<LearnResult, 'status' | 'nextAction' | 'outline' | 'rules' | 'checklist' | 'exampleWriteCall' | 'evidenceStatus' | 'scopeStatus' | 'blockers' | 'unansweredQuestions' | 'assessment'> {
   const topic = inertProse(a.topic) || 'the topic'
   const tag = a.island.split('/').at(-1) ?? a.island
   const rules = [
@@ -118,54 +127,44 @@ export function decideLearn(a: {
     frontmatter: {
       island: tag,
       pinned: false,
-      source_url: 'https://...',
-      source_version: 'latest',
+      source_url: '<exact HTTP(S) source URL>',
+      source_version: '<specific version or YYYY-MM-DD retrieval date>',
       confidence: 1.0,
     },
     content: '<first sentence answers title>. <quote/code block>. <source link>',
   }
 
-  if (a.cited >= READY_CITED_NOTES) {
-    return {
-      status: 'ready',
-      nextAction: `memory_list folder:${a.island} — island is ready; fill remaining outline gaps if any`,
-      outline: DEFAULT_OUTLINE,
-      rules,
-      checklist: [
-        `1. Island is ready with ${a.cited} cited notes.`,
-        `2. (Optional) Run memory_list folder:${a.island} to inspect coverage.`,
-        `3. (Optional) Fill any remaining outline gaps using memory_write.`,
-        `4. Update hub index at ${a.island}/README.md if new notes were added.`,
-      ],
-      exampleWriteCall,
-    }
-  }
-  if (a.coverage.notes === 0) {
-    return {
-      status: 'incomplete',
-      nextAction: `web_search official documentation for ${topic}`,
-      outline: DEFAULT_OUTLINE,
-      rules,
-      checklist: [
-        `1. web_search official documentation and API references for ${topic}.`,
-        `2. Write at least ${READY_CITED_NOTES} distinct fact notes with memory_write into ${a.island} (must include source_url).`,
-        `3. Call memory_learn again to verify status flips to "ready".`,
-        `4. Overwrite ${a.island}/README.md with a concise index of created notes.`,
-      ],
-      exampleWriteCall,
-    }
-  }
-  const remaining = READY_CITED_NOTES - a.cited
+  const evidencePresent = a.cited >= READY_CITED_NOTES
+  const scopeRecorded = a.scopeMatches === true && !!a.questions?.length
+  const unansweredQuestions = scopeRecorded ? a.questions!.filter(q => !q.answered).map(q => q.question) : DEFAULT_OUTLINE
+  const blockers: string[] = []
+  if (!evidencePresent) blockers.push(`Need ${Math.max(0, READY_CITED_NOTES - a.cited)} more notes with a valid HTTP(S) source_url and a specific source_version.`)
+  if (!scopeRecorded) blockers.push('Record research.focus and research.questions on the hub for the requested scope.')
+  if (unansweredQuestions.length) blockers.push('Each research question needs evidence paths to cited notes in this island.')
+  if (!a.hubComplete) blockers.push('Replace the scaffold with a hub index that links to the cited notes.')
+  const ready = blockers.length === 0
+  const nextAction = ready
+    ? `memory_list folder:${a.island} — inspect the recorded evidence; recheck sources when they change`
+    : a.coverage.notes === 0
+      ? `web_search official documentation for ${topic}`
+      : !evidencePresent
+        ? `memory_write cited findings into ${a.island} (${a.cited}/${READY_CITED_NOTES} valid cited notes)`
+        : `memory_write mode:update path:${a.island}/README.md — record the requested scope, evidence paths, and remaining questions`
   return {
-    status: 'incomplete',
-    nextAction: `memory_write a cited fact into ${a.island} (${a.cited}/${READY_CITED_NOTES} cited notes; need source_url)`,
-    outline: DEFAULT_OUTLINE,
+    status: ready ? 'ready' : 'incomplete',
+    nextAction,
+    outline: scopeRecorded ? a.questions!.map(q => q.question) : DEFAULT_OUTLINE,
     rules,
+    evidenceStatus: evidencePresent ? 'minimum-present' : 'missing',
+    scopeStatus: !scopeRecorded ? 'unreviewed' : unansweredQuestions.length ? 'gaps' : 'recorded-complete',
+    blockers,
+    unansweredQuestions,
+    assessment: 'Readiness checks citation syntax and agent-recorded question-to-note links. It does not verify source contents or whether a note answers its question.',
     checklist: [
-      `1. Research remaining gaps in official documentation for ${topic}.`,
-      `2. Write ${remaining} more cited fact ${remaining === 1 ? 'note' : 'notes'} with memory_write into ${a.island} (currently ${a.cited}/${READY_CITED_NOTES}).`,
-      `3. Call memory_learn again to verify status flips to "ready".`,
-      `4. Overwrite ${a.island}/README.md with a concise index of created notes.`,
+      `1. Research the requested scope in official documentation for ${topic}.`,
+      `2. Write ${Math.max(0, READY_CITED_NOTES - a.cited)} more cited fact ${READY_CITED_NOTES - a.cited === 1 ? 'note' : 'notes'} with source_url and source_version; answer all remaining questions.`,
+      `3. Update ${a.island}/README.md with an index and research: {focus, questions: [{question, evidence: [notePath]}]}. Leave evidence empty for unanswered questions.`,
+      '4. Call memory_learn with the same focus to inspect blockers and recorded readiness.',
     ],
     exampleWriteCall,
   }
@@ -431,11 +430,23 @@ memory_write({
     "pinned": false,
     "created_by": "<your agent handle>",
     "created_at": "<ISO-8601 UTC>",
-    "confidence": 1.0
+    "confidence": 1.0,
+    "research": {
+      "focus": ${JSON.stringify(inertProse(a.focus ?? ''))},
+      "questions": [
+        {"question": "<one question from the agreed outline>", "evidence": ["<vault-relative path of a cited note>"]}
+      ]
+    }
   },
   "content": "<the index, see below>"
 })
 \`\`\`
+
+Write every question in the agreed outline in \`research.questions\`. Each evidence path must
+refer to a note in this island with a valid \`source_url\` and a specific \`source_version\`.
+Use an empty evidence array for an unanswered question. Keep \`research.focus\` equal to the
+requested focus (an empty string for a broad topic). A new focus requires a new scope review.
+Readiness checks these fields; it does not independently verify that the evidence answers the questions.
 
 The hub holds: what this island covers, the versions it has been researched against, a
 \`[[wikilink]]\` index grouped by subtopic, and the canonical source links.
@@ -478,12 +489,13 @@ export function registerLearnTools(server: McpServer, ctx: ToolCtx): void {
         'Externally documented subjects only — anything you learned from this project, this team or this ' +
         'session has no public source to cite, so write it with memory_write instead. ' +
         'It creates islands/docs-<slug>/ with a hub note and lists what the island already holds. ' +
-        'status is ready only after the hub plus at least 3 notes with source_url exist; otherwise incomplete. ' +
+        'Ready requires 3 valid citations, a hub index, and agent-recorded evidence for each question in the requested scope. ' +
         'Internal topics (issue IDs, this session, team lore) return status rejected.',
       inputSchema: {
         topic: z.string().min(1).describe("what to learn, e.g. 'React Router v7'"),
         focus: z
           .string()
+          .max(300)
           .optional()
           .describe("narrow the scope, e.g. 'routing and data loading, not deployment'"),
         sources: z.array(z.string()).optional().describe('seed URLs to start from'),
@@ -673,16 +685,31 @@ export function registerLearnTools(server: McpServer, ctx: ToolCtx): void {
           await indexNow(hub.rel)
         }
 
-        const cited = (
-          db
-            .prepare(
-              `SELECT COUNT(*) AS n FROM notes
-                WHERE path LIKE ? ESCAPE '\\' AND ${NOT_HUB}
-                  AND json_extract(frontmatter, '$.source_url') IS NOT NULL`,
-            )
-            .get(...scope) as { n: number }
-        ).n
-        const decided = decideLearn({ topic, island, coverage, cited })
+        const citedPaths = new Set<string>()
+        for (const row of db.prepare(`SELECT path, frontmatter FROM notes WHERE path LIKE ? ESCAPE '\\' AND ${NOT_HUB}`)
+          .all(...scope) as { path: string; frontmatter: string }[]) {
+          const fm = JSON.parse(row.frontmatter || '{}')
+          if (fm.archived_at == null && validCitation(fm)) citedPaths.add(row.path)
+        }
+        const hubNote = parseFrontmatter(readFileSync(hub.abs, 'utf8'))
+        const research = hubNote.frontmatter.research as { focus?: unknown; questions?: unknown } | undefined
+        const normalizeFocus = (value: string) => inertProse(value).trim().toLowerCase()
+        const scopeMatches = !!research && typeof research.focus === 'string' &&
+          normalizeFocus(research.focus) === normalizeFocus(a.focus ?? '')
+        const questions = Array.isArray(research?.questions) ? research.questions.slice(0, 100).map((q: unknown) => {
+          const item = q && typeof q === 'object' ? q as Record<string, unknown> : {}
+          const question = typeof item.question === 'string' ? inertProse(item.question) : ''
+          const evidence = Array.isArray(item.evidence) ? item.evidence : []
+          return { question: question || 'Unnamed research question', answered: !!question && evidence.length > 0 &&
+            evidence.every(p => typeof p === 'string' && citedPaths.has(p)) }
+        }) : []
+        // An oversized plan must remain incomplete rather than silently ignoring its tail.
+        if (Array.isArray(research?.questions) && research.questions.length > 100)
+          questions.push({ question: 'Split this plan into at most 100 research questions.', answered: false })
+        const linked = db.prepare("SELECT dst FROM edges WHERE src_path = ? AND type = 'wikilink' AND resolved = 1")
+          .all(hub.rel) as { dst: string }[]
+        const hubComplete = !hubNote.content.includes('Research in progress') && linked.some(r => citedPaths.has(r.dst) || r.dst.startsWith(island + '/'))
+        const decided = decideLearn({ topic, island, coverage, cited: citedPaths.size, questions, scopeMatches, hubComplete })
 
         const result: LearnResult = {
           ...decided,

@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, realpathSync, renameSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { parseFrontmatter, stringifyFrontmatter } from '../frontmatter.ts'
 import type { DB } from '../db.ts'
-import { indexFile, deleteNote, embedPending, SKIP_DIRS } from '../indexer.ts'
+import { commitNotes, retargetHistory } from '../note-write.ts'
+import { indexFile, embedPending, SKIP_DIRS } from '../indexer.ts'
 import type { Embedder } from '../embed.ts'
 
 export interface ToolCtx {
@@ -81,23 +82,28 @@ export function buildToolCtx(
     reason?: string,
   ): Promise<{ archived: string; to: string; link: string }> => {
     const src = safeRel(relPath.endsWith('.md') ? relPath : relPath + '.md')
-    if (!existsSync(src.abs)) throw new Error(`note not found: ${src.rel}`)
-    if (src.rel.startsWith('archive/')) throw new Error(`already archived: ${src.rel}`)
-    const raw = readFileSync(src.abs, 'utf8')
-    const { frontmatter, content } = parseFrontmatter(raw)
-    const fm: Record<string, unknown> = {
-      ...frontmatter,
-      pinned: false,
-      archived_at: new Date().toISOString(),
-      ...(reason ? { archived_reason: reason } : {}),
-    }
     let dst = safeRel(`archive/${src.rel}`)
-    if (existsSync(dst.abs)) throw new Error(`archive target already exists: ${dst.rel}`)
-    mkdirSync(dirname(dst.abs), { recursive: true })
-    dst = safeRel(dst.rel)
-    writeFileSync(dst.abs, stringifyFrontmatter(content, fm))
-    unlinkSync(src.abs)
-    deleteNote(db, src.rel)
+    commitNotes(db, vault, () => {
+      assertIndexable(src.rel)
+      if (!existsSync(src.abs)) throw new Error(`note not found: ${src.rel}`)
+      if (src.rel.startsWith('archive/')) throw new Error(`already archived: ${src.rel}`)
+      const raw = readFileSync(src.abs, 'utf8')
+      const { frontmatter, content } = parseFrontmatter(raw)
+      const fm: Record<string, unknown> = {
+        ...frontmatter,
+        pinned: false,
+        archived_at: new Date().toISOString(),
+        ...(reason ? { archived_reason: reason } : {}),
+      }
+      if (existsSync(dst.abs)) throw new Error(`archive target already exists: ${dst.rel}`)
+      mkdirSync(dirname(dst.abs), { recursive: true })
+      dst = safeRel(dst.rel)
+      return [
+        { ...dst, raw: stringifyFrontmatter(content, fm) },
+        { ...src, raw: null },
+        ...retargetHistory(db, safeRel, new Map([[src.rel, dst.rel]])),
+      ]
+    })
     await indexNow(dst.rel)
     return { archived: src.rel, to: dst.rel, link: deepLink(dst.rel) }
   }

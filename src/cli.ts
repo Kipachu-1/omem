@@ -26,7 +26,7 @@ ${cmdLine('index', 'full sync (incremental via content hashes)')}
 ${cmdLine('watch', 'sync, then watch the vault and index changes live ' + dim('[--poll N: also full-sync every N seconds]'))}
 ${cmdLine('serve', `watch + MCP server on stdio (the normal run mode; --poll defaults to 30)
            ${dim('--port N serves MCP over HTTP instead; set OMEM_HTTP_TOKEN to require bearer auth')}`)}
-${cmdLine('search', `query the index:  omem search "how does X work" ${dim('[--json] [--limit N] [--folder F] [--tag T] [--keyword-only] [--after T] [--before T]')}`)}
+${cmdLine('search', `query the index:  omem search "how does X work" ${dim('[--json] [--limit N] [--folder F] [--tag T] [--keyword-only] [--include-archived] [--after T] [--before T]')}`)}
 ${cmdLine('doctor', 'health check — vault, db, git, embeddings, HTTP token, last sync')}
 ${cmdLine('sync', 'git commit + pull + push the vault once (cron-friendly)')}
 ${cmdLine('rebuild', 'drop the index and re-sync from scratch')}
@@ -54,6 +54,7 @@ const { values, positionals } = parseArgs({
     limit: { type: 'string' },
     folder: { type: 'string' },
     tag: { type: 'string', multiple: true },
+    'include-archived': { type: 'boolean' },
     'keyword-only': { type: 'boolean' },
     after: { type: 'string' },
     before: { type: 'string' },
@@ -193,6 +194,7 @@ async function main(): Promise<void> {
         tags: values.tag,
         after: parseTime(values.after, '--after'),
         before: parseTime(values.before, '--before'),
+        includeArchived: values['include-archived'],
         embedder: values['keyword-only'] ? null : embedder,
       })
       sp.done()
@@ -381,8 +383,9 @@ async function main(): Promise<void> {
 
     case 'doctor': {
       const vault = vaultPath()
-      const { runDoctor } = await import('./doctor.ts')
-      await runDoctor(vault)
+      const { runDoctor, checkDoctor } = await import('./doctor.ts')
+      if (values.json) console.log(JSON.stringify(await checkDoctor(vault), null, 2))
+      else await runDoctor(vault)
       break
     }
 

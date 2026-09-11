@@ -17,6 +17,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolCtx): void {
         'Use this FIRST when answering anything that may touch prior context: past decisions, conventions, projects, people, gotchas. ' +
         'Returns ranked chunks with note paths and obsidian:// links.',
       inputSchema: {
+        includeArchived: z.boolean().optional().describe('include archived history; default false'),
         query: z.string().describe('natural-language query'),
         limit: z.number().int().min(1).max(50).optional().describe('max results, default 10'),
         folder: z.string().optional().describe("restrict to a folder prefix, e.g. 'islands/y-agents'"),
@@ -32,6 +33,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolCtx): void {
     async a =>
       withUsage('memory_search', a, async () => {
         const results = await search(db, a.query, {
+          includeArchived: a.includeArchived,
           limit: a.limit,
           folder: a.folder,
           tags: a.tags,
@@ -57,6 +59,8 @@ export function registerSearchTools(server: McpServer, ctx: ToolCtx): void {
         'Use this before acting on anything that may have prior context, instead of guessing ' +
         'a query for memory_search.',
       inputSchema: {
+        includeArchived: z.boolean().optional().describe('include archived history; default false'),
+        maxTokens: z.number().int().min(256).max(100000).optional().describe('approximate response budget: compact JSON UTF-8 bytes / 3, including source links'),
         context: z.string().describe('the task, question, or topic to recall for (natural language)'),
         limit: z.number().int().min(1).max(50).optional().describe('total results, default 20'),
         kinds: z
@@ -72,20 +76,25 @@ export function registerSearchTools(server: McpServer, ctx: ToolCtx): void {
       withUsage('memory_recall', a, async () => {
         if (!a.context.trim()) throw new Error('context required')
         const r = await recall(db, a.context, {
+          includeArchived: a.includeArchived,
           limit: a.limit,
           kinds: a.kinds,
           pinnedOnly: a.pinnedOnly,
+          maxTokens: a.maxTokens,
+          linkForPath: deepLink,
           folder: a.folder,
           embedder,
         })
         const withLinks = (arr: { notePath: string }[]) =>
           arr.map(x => ({ ...x, link: deepLink(x.notePath) }))
-        return json({
+        const payload = {
           query: r.query,
           grouped: Object.fromEntries(Object.entries(r.grouped).map(([k, v]) => [k, withLinks(v)])),
           related: withLinks(r.related),
           totalScanned: r.totalScanned,
-        })
+          ...(r.budget ? { budget: r.budget } : {}),
+        }
+        return r.budget ? { content: [{ type: 'text' as const, text: JSON.stringify(payload) }] } : json(payload)
       }),
   )
 }

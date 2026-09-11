@@ -23,14 +23,15 @@ omem setup             # wire it up
 omem agents            # register with Claude Code, Cursor, Windsurf, Gemini CLI, …
 
 omem                   # no args → interactive REPL: query the vault, /help for slash commands
-omem doctor            # health check: vault, db, git, embeddings, HTTP token, last sync
+omem doctor            # infrastructure and knowledge health checks
+omem doctor --json     # structured report
 ```
 
 No vault yet? [`template/`](./template) is a ready-to-use starting structure:
 per-domain `islands/`, `inbox/` for triage, `archive/` for superseded notes, and
 [`CONVENTIONS.md`](./template/CONVENTIONS.md) that teaches agents the write rules.
 
-> **npm version:** published latest is 0.9.0 — the core feature set below is live on the registry.
+> **Development checkout:** the retrieval, update, research, and health improvements below are unreleased. The package version is 0.10.0.
 
 ## How it works
 
@@ -94,8 +95,8 @@ write, and refine** — all over MCP, all against your markdown vault.
   — decisions, gotchas, conventions float to the top. Pinned facts rank first.
 - **Search & read.** Hybrid keyword + vector + graph search over every note. Full
   notes with backlinks. Browse by folder or tag without a query.
-- **Write & refine.** Agents write plain markdown with frontmatter. Before writing,
-  they see near-duplicate candidates so they append instead of creating dupes.
+- **Write & refine.** Agents write plain markdown with frontmatter. After creation,
+  they receive similarity candidates to review. Similarity alone does not establish duplication.
   Notes can be stamped with a `kind` (decision, gotcha, convention, …) and pinned
   for canonical facts. Superseded notes are archived, never deleted.
 - **Observe.** Per-client watermarks mean an agent can ask "what changed since I
@@ -138,8 +139,7 @@ task and the server `instructions` tell it to recall first. Real output from a f
 }
 ```
 
-**Write** — creates the note **and** returns dedup candidates so the agent appends
-instead of duplicating:
+**Write** — creates the note and returns similarity candidates for review:
 ```json
 {
   "path": "islands/example-project/2026-07-06-demo-decision.md",
@@ -152,6 +152,134 @@ instead of duplicating:
   ]
 }
 ```
+
+## Retrieval, updates, and memory health
+
+Search and recall exclude `archive/` notes and notes with `archived_at` by default.
+Use `includeArchived: true` for history, or `omem search "query" --include-archived`.
+Folder filters do not override this default. Browse and direct reads still expose history.
+Link-only and heading-only chunks receive lower priority, including before candidate limits,
+so navigation cannot crowd answer text out of a retrieval leg. No reindex is required.
+
+### Budgeted task context
+
+```json
+{
+  "context": "Implement authentication in project X",
+  "folder": "islands/project-x",
+  "limit": 10,
+  "maxTokens": 2000
+}
+```
+
+Pass these arguments to `memory_recall`. It returns each note once and respects the total
+`limit` across groups and related notes. Optional `maxTokens` trims excerpts while retaining
+note paths, titles, and source links. The `budget` field reports estimated usage and whether
+results were shortened or omitted. The estimate is UTF-8 bytes divided by three for the
+compact JSON response, including links and metadata; it is not a model-specific token count.
+The minimum budget is 256. An oversized query can leave too little space for response metadata
+and returns an explicit error.
+
+### Metadata-preserving updates
+
+Read the note with `memory_get_note`, then use its `hash` in an update:
+
+```json
+{
+  "path": "islands/project-x/auth.md",
+  "mode": "update",
+  "title": "Authentication policy",
+  "content": "The revised note body.",
+  "expectedHash": "<hash returned by memory_get_note>",
+  "frontmatter": { "verified_at": "2026-09-11T00:00:00Z" }
+}
+```
+
+`update` replaces the body and shallow-merges supplied metadata. Omitted fields, including
+sources, tags, kind, and island ownership, survive. Existing `created` and `source` values
+remain intact; `updated` records the update time. Supply `tags: []` to clear tags. Nested
+metadata objects are replaced as a whole. `overwrite` still replaces all metadata, and
+`append` adds body text. Both accept `expectedHash`. A stale hash rejects the write before
+any file changes. Supplied `confidence` must be a finite number from zero through one.
+
+Writes use temporary files and atomic renames. Cooperating writers sharing the same SQLite
+index serialize their checks and mutations. External editors and writers using separate
+indexes do not share this lock. Multi-file operations roll back ordinary write failures;
+a process crash midway through an operation is not a crash-atomic transaction.
+
+### Decision history
+
+On creation, `supersedes: ["path/to/old-note.md"]` archives predecessors and writes:
+
+- `supersedes` on the new note, containing the resulting archive paths.
+- `superseded_by` on each archived note, pointing to the successor.
+
+`memory_get_note` exposes these as `history.supersedes` and `history.supersededBy`.
+Later supersession and archiving update existing history pointers when a successor moves.
+The note body should state why the decision changed. Manual moves and `memory_move` do not
+rewrite these pointers; the health report can identify missing replacement targets.
+
+### Research readiness
+
+`memory_learn` still delegates research to the calling agent. Three valid cited notes now
+mean `evidenceStatus: "minimum-present"`; that alone does not make the island ready.
+Each counted note needs an HTTP(S) `source_url` and a specific `source_version` or retrieval
+date. Placeholders such as `latest` do not count.
+
+Write the research plan on the hub with `memory_write`, using metadata like this:
+
+```json
+{
+  "research": {
+    "focus": "authentication and retries",
+    "questions": [
+      { "question": "How does authentication work?", "evidence": ["islands/docs-example/auth.md"] },
+      { "question": "Which failures can be retried?", "evidence": [] }
+    ]
+  }
+}
+```
+
+Focus is limited to 300 characters; whitespace, case, and Markdown markers are normalized.
+Use the same `focus` when calling `memory_learn` again; use an empty string for a broad topic.
+Evidence paths must name cited notes in the same island. Empty evidence arrays preserve
+unanswered questions for later runs. Readiness requires at least three valid cited notes,
+a hub index, and evidence for every question in the matching plan. Responses include
+`blockers`, `unansweredQuestions`, and `scopeStatus`. Plans support up to 100 questions;
+larger plans remain incomplete and must be split.
+
+These are structural checks of agent-supplied evidence. They do not verify source contents,
+prove that a note answers its question, or establish that the plan covers the whole topic.
+A new focus requires a new scope review.
+
+### Read-only health checks
+
+`omem doctor` includes a knowledge audit. Use `omem doctor --json` or
+`memory_status({"includeHealth": true})` for structured findings:
+
+- Verification overdue: `review_after` is due, or `verified_at` is older than 90 days when no review date is set.
+- Unverified notes: no valid `verified_at`; file modification time is not verification.
+- Research notes missing a valid source URL or specific version.
+- Unresolved wikilinks from active notes.
+- Duplicate candidates with matching titles or normalized indexed bodies, for human or agent review.
+- Archived decisions without an existing `superseded_by` target.
+
+Each category includes a complete count and at most 20 examples. The audit reads the current
+index and changes no notes. Doctor opens an existing index read-only; it does not create or
+rebuild a missing index. Unindexed or stale index contents limit the report.
+
+### Retrieval benchmark
+
+Run `npm run benchmark:retrieval` from a checkout. The fixture contains eight curated
+questions, eight answer notes, eight archived notes, and 192 navigation notes. It uses
+deterministic test embeddings and measures top-1/top-5 answer hits, archived results, and
+navigation results for keyword and hybrid search. It makes no network calls.
+
+Against the original implementation, this fixture returned navigation in all 40 top-five
+slots for both modes, with zero answer hits. The revised implementation has 8/8 top-1 and
+8/8 top-5 answer hits in both modes, zero archived results, and navigation in 17/40 keyword
+slots and 0/40 hybrid slots. This is a regression benchmark for navigation saturation,
+not a measurement of live-vault accuracy or production embedding quality.
 
 ## Run modes
 

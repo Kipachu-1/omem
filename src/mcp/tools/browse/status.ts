@@ -1,3 +1,5 @@
+import { z } from 'zod'
+import { memoryHealth } from '../../../health.ts'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { vaultStatus } from '../../../status.ts'
 import { withUsage } from '../../shared.ts'
@@ -15,13 +17,14 @@ export function registerStatus(server: McpServer, ctx: ToolCtx): void {
         'Cheap one-call orientation: vault size, last modification, top folders, top tags, ' +
         'top kinds, pinned/archived counts, and a few most-recent notes. Use on a fresh session to decide ' +
         'whether memory is worth querying, and what to query.',
-      inputSchema: {}, // no inputs
+      inputSchema: { includeHealth: z.boolean().optional().describe('include a read-only knowledge audit; default false') },
       annotations: { readOnlyHint: true },
     },
-    async () =>
-      withUsage('memory_status', {}, async () => {
+    async a =>
+      withUsage('memory_status', a, async () => {
         const snap = vaultStatus(db)
         return json({
+          ...(a.includeHealth ? { health: memoryHealth(db) } : {}),
           notes: snap.notes,
           chunks: snap.chunks,
           embedded: snap.embedded,

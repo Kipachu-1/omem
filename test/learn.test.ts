@@ -71,11 +71,12 @@ test('decideLearn stays incomplete until the cited-note bar', () => {
   assert.equal(almostReady.status, 'incomplete')
   assert.match(almostReady.checklist![1], /Write 1 more cited fact note with/)
 
-  const ready = decideLearn({ topic: 'React Router v7', island, coverage: { ...uncited, notes: READY_CITED_NOTES }, cited: READY_CITED_NOTES })
+  const ready = decideLearn({ topic: 'React Router v7', island, coverage: { ...uncited, notes: READY_CITED_NOTES }, cited: READY_CITED_NOTES, scopeMatches: true, hubComplete: true, questions: [{ question: "How does routing work?", answered: true }] })
   assert.equal(ready.status, 'ready')
   assert.match(ready.nextAction, /memory_list/)
   assert.equal(ready.checklist?.length, 4)
-  assert.match(ready.checklist![0], /Island is ready with 3 cited notes/)
+  assert.equal(ready.scopeStatus, "recorded-complete")
+  assert.deepEqual(ready.blockers, [])
   assert.equal(ready.exampleWriteCall?.folder, island)
 })
 

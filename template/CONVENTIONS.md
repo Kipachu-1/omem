@@ -44,8 +44,8 @@ Notes are chunked and embedded for retrieval, so the prose style is not cosmetic
 | `links-to` | string[] | no | array of `[[wikilink]]` strings | Explicit outbound links. Wikilinks in the body also count. |
 
 The omem write layer injects `title`, `created`, and `source: agent` automatically.
-Everything else above is the **writer's responsibility** — omem does not reject
-non-conforming notes, so a missing field is a silent convention violation, not an error.
+Other fields above are the **writer's responsibility**. omem validates supplied `confidence`
+as a finite number from zero through one; most missing fields remain convention violations.
 
 ## Full note example
 
@@ -98,3 +98,32 @@ Use [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:
   hub is exempt — it indexes notes rather than stating a fact, and lists its sources in the body.
 - **No secrets:** tokens, keys, personal identifiers never go in the vault — it syncs to a remote and agents quote from it.
 - **Distill, don't dump:** notes are curated facts, not raw session logs. One fact per note beats one note per session.
+
+
+## Safe updates and verification
+
+Read with `memory_get_note` before editing. Use `mode: "update"` and the returned `hash`
+as `expectedHash` to replace the body while preserving omitted metadata. If the hash no
+longer matches, read again and reconcile the changes. `overwrite` replaces metadata;
+use it only when that replacement is intentional.
+
+After checking a source, write `verified_at` as an ISO-8601 UTC timestamp. Set `review_after`
+when a fact needs review on a specific date. Without a review date, `omem doctor` reports
+verification older than 90 days. A write timestamp does not count as verification.
+
+## Decision succession
+
+Use `memory_write` with `supersedes` when a new decision replaces an existing one. Explain
+why in the new body. omem writes `supersedes` archive paths on the new note and
+`superseded_by` on each predecessor. Search excludes archived notes by default;
+use `includeArchived: true` when asking about history.
+
+## Research scope
+
+A docs island's hub carries `research: {focus, questions: [{question, evidence: [notePath]}]}`.
+Use the requested focus, or an empty string for a broad topic. Write every question from
+the agreed outline. Evidence paths name notes in that island with a valid HTTP(S)
+`source_url` and a specific `source_version` or retrieval date. Leave evidence empty for
+unanswered questions. Three cited notes alone do not establish research completion.
+Call `memory_learn` again with the same focus to inspect blockers. Ready means the
+agent-supplied evidence passes structural checks, not that omem verified the sources.

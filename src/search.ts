@@ -1,6 +1,7 @@
 import { getMeta, type DB } from './db.ts'
 import { bufToVec, dot, type Embedder } from './embed.ts'
 import { folderPat, tagEscape } from './filters.ts'
+import { ACTIVE_NOTE_SQL, isNavigationOnly } from './quality.ts'
 
 export interface SearchOpts {
   limit?: number
@@ -12,6 +13,7 @@ export interface SearchOpts {
   embedder?: Embedder | null
   kinds?: string[] // restrict to these memory kinds (decision|gotcha|convention|fact|meeting|log)
   pinned?: boolean // only pinned notes
+  includeArchived?: boolean // history is opt-in across all retrieval legs
 }
 
 export type MatchType = 'vector' | 'keyword' | 'both' | 'graph'
@@ -46,9 +48,14 @@ export async function search(db: DB, query: string, opts: SearchOpts = {}): Prom
     const match = tokens.map(t => `"${t}"`).join(' OR ')
     // with filters active, scan all matches — a LIMIT window before filtering can starve in-scope hits
     const rows = db
-      .prepare(`SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank ${allowed ? '' : 'LIMIT 100'}`)
-      .all(match) as { rowid: number }[]
-    ftsIds = filterAllowed(db, rows.map(r => r.rowid), allowed).slice(0, LEG)
+      .prepare(`SELECT chunks_fts.rowid, chunks_fts.text, c.note_path FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid WHERE chunks_fts MATCH ? ORDER BY rank`)
+      .all(match) as { rowid: number; text: string; note_path: string }[]
+    ftsIds = rows
+      .filter(r => !allowed || allowed.has(r.note_path))
+      .map(r => ({ id: r.rowid, navigation: isNavigationOnly(r.text) }))
+      .sort((a, b) => Number(a.navigation) - Number(b.navigation))
+      .slice(0, LEG)
+      .map(r => r.id)
   }
 
   // vector leg: brute-force dot product over all embedded chunks
@@ -65,12 +72,12 @@ export async function search(db: DB, query: string, opts: SearchOpts = {}): Prom
   }
   if (queryVec) {
     const rows = db
-      .prepare('SELECT id, note_path, embedding FROM chunks WHERE embedding IS NOT NULL')
-      .all() as { id: number; note_path: string; embedding: Buffer }[]
+      .prepare('SELECT id, note_path, text, embedding FROM chunks WHERE embedding IS NOT NULL')
+      .all() as { id: number; note_path: string; text: string; embedding: Buffer }[]
     vecIds = rows
       .filter(r => !allowed || allowed.has(r.note_path))
-      .map(r => ({ id: r.id, sim: dot(queryVec!, bufToVec(r.embedding)) }))
-      .sort((a, b) => b.sim - a.sim)
+      .map(r => ({ id: r.id, sim: dot(queryVec!, bufToVec(r.embedding)), navigation: isNavigationOnly(r.text) }))
+      .sort((a, b) => Number(a.navigation) - Number(b.navigation) || b.sim - a.sim)
       .slice(0, LEG)
       .map(r => r.id)
   }
@@ -141,7 +148,9 @@ export async function search(db: DB, query: string, opts: SearchOpts = {}): Prom
     if (row.pinned === 1) e.score *= 1.4
     if (row.kind && HIGH_RANK_KINDS.has(row.kind)) e.score *= 1.2
     // confidence boost (OME-28): trust-weighted retrieval — confidence:1.0 = 1.0×, 0.0 = 0.7×
-    if (row.confidence != null) e.score *= 0.7 + 0.3 * row.confidence
+    if (typeof row.confidence === 'number' && Number.isFinite(row.confidence))
+      e.score *= 0.7 + 0.3 * Math.max(0, Math.min(1, row.confidence))
+    if (isNavigationOnly(row.text)) e.score *= 0.15
   }
 
   entries.sort((a, b) => b.score - a.score)
@@ -192,6 +201,9 @@ export interface RecallOpts {
   pinnedOnly?: boolean
   folder?: string
   embedder?: Embedder | null
+  includeArchived?: boolean
+  maxTokens?: number
+  linkForPath?: (path: string) => string
 }
 
 export interface RecallResult {
@@ -199,6 +211,7 @@ export interface RecallResult {
   grouped: Record<string, SearchResult[]>
   related: SearchResult[]
   totalScanned: number
+  budget?: { maxTokens: number; estimatedTokens: number; truncated: boolean; estimation: string }
 }
 
 /** One-call context retrieval: search (which already filters by kind/pinned and applies the
@@ -212,6 +225,7 @@ export async function recall(db: DB, context: string, opts: RecallOpts = {}): Pr
     folder: opts.folder,
     kinds: opts.kinds,
     pinned: opts.pinnedOnly,
+    includeArchived: opts.includeArchived,
     expandGraph: true,
     embedder: opts.embedder,
   })
@@ -229,25 +243,59 @@ export async function recall(db: DB, context: string, opts: RecallOpts = {}): Pr
     log: [],
   }
   const used = new Set<string>()
-  for (const r of results) {
-    const k = meta.get(r.notePath)?.kind
-    if (k && grouped[k] && grouped[k].length < KIND_CAPS[k] && !used.has(r.notePath)) {
-      grouped[k].push(r)
-      used.add(r.notePath)
-    }
+  const related: SearchResult[] = []
+  const result: RecallResult = { query: context, grouped, related, totalScanned: results.length }
+  // Count the compact response, including source links, using an approximate byte estimate.
+  const estimate = () => {
+    const linked = (r: SearchResult) => ({ ...r, ...(opts.linkForPath ? { link: opts.linkForPath(r.notePath) } : {}) })
+    return Math.ceil(Buffer.byteLength(JSON.stringify({
+      ...result,
+      grouped: Object.fromEntries(Object.entries(grouped).map(([k, v]) => [k, v.map(linked)])),
+      related: related.map(linked),
+    }), 'utf8') / 3)
   }
-
-  // related: top remaining by score, filling up to `limit`
-  const groupedTotal = Object.values(grouped).reduce((n, b) => n + b.length, 0)
-  const relatedCap = Math.max(0, limit - groupedTotal)
-  const related = results.filter(r => !used.has(r.notePath)).slice(0, relatedCap)
-
-  return { query: context, grouped, related, totalScanned: results.length }
+  if (opts.maxTokens != null) {
+    if (!Number.isInteger(opts.maxTokens) || opts.maxTokens < 256) throw new Error('maxTokens must be an integer >= 256')
+    result.budget = { maxTokens: opts.maxTokens, estimatedTokens: opts.maxTokens, truncated: false, estimation: 'UTF-8 bytes / 3; compact JSON, not a model tokenizer' }
+    if (estimate() > opts.maxTokens) throw new Error('maxTokens is too small for the query and response metadata')
+  }
+  for (const r of results) {
+    if (used.has(r.notePath)) continue
+    if (used.size >= limit) break
+    const k = meta.get(r.notePath)?.kind
+    const bucket = k && grouped[k] && grouped[k].length < KIND_CAPS[k] ? grouped[k] : related
+    const candidate = { ...r }
+    bucket.push(candidate)
+    if (result.budget && estimate() > result.budget.maxTokens) {
+      result.budget.truncated = true
+      // Keep a useful prefix of long excerpts; never discard their path/title/source link.
+      const original = candidate.text
+      let low = 0, high = original.length
+      while (low < high) {
+        const mid = Math.ceil((low + high) / 2)
+        candidate.text = original.slice(0, mid) + '…'
+        if (estimate() <= result.budget.maxTokens) low = mid
+        else high = mid - 1
+      }
+      candidate.text = original.slice(0, low) + '…'
+      if (low < Math.min(80, original.length) || estimate() > result.budget.maxTokens) {
+        bucket.pop()
+        continue
+      }
+    }
+    used.add(r.notePath)
+  }
+  if (result.budget) {
+    result.budget.truncated ||= new Set(results.map(r => r.notePath)).size > used.size
+    result.budget.estimatedTokens = estimate()
+  }
+  return result
 }
 
 /** Pre-ranking filters -> allowed note paths, or null when unfiltered. */
 function allowedPaths(db: DB, opts: SearchOpts): Set<string> | null {
   if (
+    opts.includeArchived === true &&
     !opts.folder &&
     !opts.tags?.length &&
     opts.after == null &&
@@ -256,7 +304,7 @@ function allowedPaths(db: DB, opts: SearchOpts): Set<string> | null {
     opts.pinned == null
   )
     return null
-  const where: string[] = []
+  const where: string[] = opts.includeArchived ? [] : [ACTIVE_NOTE_SQL]
   const params: unknown[] = []
   if (opts.folder) {
     where.push("path LIKE ? ESCAPE '\\'")
@@ -277,17 +325,8 @@ function allowedPaths(db: DB, opts: SearchOpts): Set<string> | null {
     const t = tag.replace(/^#/, '')
     params.push(t, tagEscape(t) + '/%')
   }
-  const rows = db.prepare(`SELECT path FROM notes WHERE ${where.join(' AND ')}`).all(...params) as { path: string }[]
+  const rows = db.prepare(`SELECT path FROM notes ${where.length ? 'WHERE ' + where.join(' AND ') : ''}`).all(...params) as { path: string }[]
   return new Set(rows.map(r => r.path))
-}
-
-function filterAllowed(db: DB, ids: number[], allowed: Set<string> | null): number[] {
-  if (!allowed || !ids.length) return ids
-  const rows = db
-    .prepare(`SELECT id, note_path FROM chunks WHERE id IN (${ids.map(() => '?').join(',')})`)
-    .all(...ids) as { id: number; note_path: string }[]
-  const pathOf = new Map(rows.map(r => [r.id, r.note_path]))
-  return ids.filter(id => allowed.has(pathOf.get(id) ?? ''))
 }
 
 interface ChunkRow {
@@ -319,9 +358,11 @@ function chunkInfo(db: DB, ids: number[]): Map<number, ChunkRow> {
 /** Best chunk of a note for the query: max cosine when we have a query vector, else the first chunk. */
 function bestChunk(db: DB, notePath: string, queryVec: Float32Array | null): number | null {
   const rows = db
-    .prepare('SELECT id, embedding FROM chunks WHERE note_path = ? ORDER BY position')
-    .all(notePath) as { id: number; embedding: Buffer | null }[]
+    .prepare('SELECT id, text, embedding FROM chunks WHERE note_path = ? ORDER BY position')
+    .all(notePath) as { id: number; text: string; embedding: Buffer | null }[]
   if (!rows.length) return null
+  const prose = rows.filter(r => !isNavigationOnly(r.text))
+  if (prose.length) rows.splice(0, rows.length, ...prose)
   if (!queryVec) return rows[0].id
   let best = rows[0].id
   let bestSim = -Infinity

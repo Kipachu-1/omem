@@ -2,18 +2,21 @@
  * `omem doctor` — one-command health check.
  *
  * Checks: vault exists, db opens, git remote configured, embed model recorded,
- * pending-embedding count, `OMEM_HTTP_TOKEN` set, last-sync age.
+ * pending-embedding count, `OMEM_HTTP_TOKEN` set, last-sync age, and indexed note quality.
  * Returns a structured report and prints a colored summary.
  *
- * `checkDoctor()` is pure (no printing) so tests can assert the shape;
+ * `checkDoctor()` is read-only and does not print;
  * `runDoctor()` prints the colored report to stderr and returns the report.
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join } from 'node:path'
-import { openDb, getMeta, type DB } from './db.ts'
+import { getMeta, type DB } from './db.ts'
 import { bold, dim, green, yellow, red, ok, warn } from './ui.ts'
+
+import Database from 'better-sqlite3'
+import { memoryHealth, type MemoryHealth } from './health.ts'
 
 const run = promisify(execFile)
 
@@ -28,6 +31,7 @@ export interface DoctorReport {
   httpToken: boolean
   lastSync: number | null
   lastSyncAge: string | null
+  health: MemoryHealth | null
 }
 
 export async function checkDoctor(vault: string): Promise<DoctorReport> {
@@ -38,12 +42,14 @@ export async function checkDoctor(vault: string): Promise<DoctorReport> {
   let pendingEmbeddings = 0
   let totalChunks = 0
   let lastSync: number | null = null
+  let health: MemoryHealth | null = null
 
   if (vaultOk) {
     try {
       const dbPath = process.env.OMEM_DB_PATH ?? join(vault, '.omem', 'index.db')
-      db = openDb(dbPath)
+      db = new Database(dbPath, { readonly: true, fileMustExist: true })
       dbOk = true
+      health = memoryHealth(db)
       embedModel = getMeta(db, 'embed_model') ?? null
       totalChunks = (db.prepare('SELECT COUNT(*) AS c FROM chunks').get() as { c: number }).c
       pendingEmbeddings = (
@@ -97,6 +103,7 @@ export async function checkDoctor(vault: string): Promise<DoctorReport> {
     httpToken,
     lastSync,
     lastSyncAge,
+    health,
   }
 }
 
@@ -159,7 +166,20 @@ export async function runDoctor(vault: string): Promise<DoctorReport> {
     ),
   )
 
-  const allGood = r.vault && r.db && r.gitRemote && r.embedModel && embedComplete && r.httpToken
+  if (r.health) {
+    for (const [key, label] of [
+      ['stale', 'verification due'], ['unverified', 'unverified notes'],
+      ['missingCitations', 'citation gaps'], ['brokenLinks', 'broken wikilinks'],
+      ['possibleDuplicates', 'duplicate candidates'], ['archivedWithoutReplacement', 'history gaps'],
+    ] as const) {
+      const finding = r.health[key]
+      console.error(row(label, finding.count === 0, `${finding.count} (indexed notes)`))
+      for (const item of finding.items) console.error(dim(`    ${item.path}: ${item.detail}`))
+      if (finding.count > finding.items.length) console.error(dim(`    … and ${finding.count - finding.items.length} more`))
+    }
+  }
+  const knowledgeGood = r.health && Object.values(r.health).every(v => typeof v !== 'object' || !v || !('count' in v) || v.count === 0)
+  const allGood = knowledgeGood && r.vault && r.db && r.gitRemote && r.embedModel && embedComplete && r.httpToken
   console.error('')
   if (allGood) ok('all checks passed')
   else warn('some checks need attention (marked with !)')

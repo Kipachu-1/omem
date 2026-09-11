@@ -867,24 +867,36 @@ test('memory_learn rejects internal topics without scaffolding an island', async
   assert.equal(session.status, 'rejected')
 })
 
-test('memory_learn is ready only after three cited notes', async () => {
+test('memory_learn requires cited notes and a completed plan for the requested focus', async () => {
   const l = await call('memory_learn', { topic: 'Cited Ready Topic' })
   assert.equal(l.status, 'incomplete')
 
+  const paths: string[] = []
   for (const title of ['Cited fact one', 'Cited fact two', 'Cited fact three']) {
-    await call('memory_write', {
+    const note = await call('memory_write', {
       title,
       content: `${title} body from official docs.`,
       folder: l.island,
       kind: 'fact',
       frontmatter: { source_url: 'https://example.com/docs', source_version: '1.0' },
     })
+    paths.push(note.path)
   }
 
+  const evidenceOnly = await call('memory_learn', { topic: 'Cited Ready Topic' })
+  assert.equal(evidenceOnly.status, 'incomplete')
+  assert.equal(evidenceOnly.evidenceStatus, 'minimum-present')
+  await call('memory_write', { path: l.hub, mode: 'update', title: 'Cited Ready Topic',
+    content: paths.map(p => `- [[${p}]]`).join('\n'),
+    frontmatter: { research: { focus: '', questions: paths.map(p => ({ question: `What does ${p} explain?`, evidence: [p] })) } },
+  })
   const ready = await call('memory_learn', { topic: 'Cited Ready Topic' })
   assert.equal(ready.coverage.notes, 3)
   assert.equal(ready.status, 'ready')
   assert.match(ready.nextAction, /memory_list/)
+  const newFocus = await call('memory_learn', { topic: 'Cited Ready Topic', focus: 'error recovery' })
+  assert.equal(newFocus.status, 'incomplete')
+  assert.equal(newFocus.scopeStatus, 'unreviewed')
 })
 
 test('memory_learn slugs away path separators', async () => {
@@ -898,4 +910,35 @@ test('memory_usage is advertised as read-only', async () => {
   const tool = tools.find(t => t.name === 'memory_usage')
   assert.ok(tool, 'memory_usage must be listed')
   assert.equal(tool.annotations?.readOnlyHint, true, 'memory_usage must declare readOnlyHint')
+})
+
+test('safe update and decision history are exposed over MCP', async () => {
+  const original = await call('memory_write', { title: 'Hash checked note', content: 'Original content.', frontmatter: { source_url: 'https://example.com/docs', source_version: '1.0' }, kind: 'decision' })
+  const read = await call('memory_get_note', { path: original.path })
+  assert.equal(read.hash, original.hash)
+  const updated = await call('memory_write', { title: 'Hash checked note', content: 'Updated content.', path: original.path, mode: 'update', expectedHash: read.hash })
+  assert.notEqual(updated.hash, read.hash)
+  const stale = await client.callTool({ name: 'memory_write', arguments: { title: 'Stale note', content: 'Stale body.', path: original.path, mode: 'update', expectedHash: read.hash } })
+  assert.equal(stale.isError, true)
+  assert.equal((await call('memory_get_note', { path: original.path })).frontmatter.source_version, '1.0')
+  const successor = await call('memory_write', { title: 'Successor note', content: 'This decision replaces the previous one because its requirements changed.', supersedes: [original.path] })
+  const archived = await call('memory_get_note', { path: successor.superseded[0].to })
+  assert.equal(archived.history.supersededBy, successor.path)
+  assert.deepEqual((await call('memory_get_note', { path: successor.path })).history.supersedes, [archived.path])
+})
+
+test('budgeted recall and health reports are exposed over MCP', async () => {
+  const note = await call('memory_write', { title: 'Budget example', content: 'budgetmcpneedle ' + 'Keep a useful answer with its source. '.repeat(300), folder: 'budget-test', kind: 'decision' })
+  const result = await client.callTool({ name: 'memory_recall', arguments: { context: 'budgetmcpneedle', folder: 'budget-test', maxTokens: 500, limit: 1 } })
+  assert.ok(!result.isError)
+  const text = (result.content as { text: string }[])[0].text
+  const packed = JSON.parse(text)
+  assert.ok(Buffer.byteLength(text) / 3 <= 500)
+  assert.equal(packed.grouped.decision[0].notePath, note.path)
+  assert.ok(packed.grouped.decision[0].link.startsWith('obsidian://'))
+  const status = await call('memory_status', { includeHealth: true })
+  assert.ok(status.health.notes > 0)
+  assert.ok(status.health.unverified.count > 0)
+  assert.ok(status.health.unverified.items.length <= 20)
+  assert.equal((await call('memory_status', {})).health, undefined)
 })
