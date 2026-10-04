@@ -127,3 +127,21 @@ the agreed outline. Evidence paths name notes in that island with a valid HTTP(S
 unanswered questions. Three cited notes alone do not establish research completion.
 Call `memory_learn` again with the same focus to inspect blockers. Ready means the
 agent-supplied evidence passes structural checks, not that omem verified the sources.
+
+## Shared skills
+
+Reusable workflows live in `skills/<name>/SKILL.md` with their supporting files.
+Use `skill_list` to discover relevant workflows, then `skill_get` to read their
+instructions and file manifest. Fetch supporting files with `skill_read_file`
+at the returned revision. The calling agent runs scripts with its own tools.
+
+Use `skill_write` for creation and updates. `expectedRevision: null` creates a
+new bundle; updates require its current revision. Keep unmentioned files and
+remove files only through explicit `removeFiles`. Archive a retired workflow
+with `skill_archive`. Memory tools cannot write into skill directories.
+
+The required YAML `name` matches the directory and uses lowercase letters,
+numbers, and single hyphens. Supply a nonempty `description` that explains when
+the workflow applies. Keep file references relative to the skill root. Never
+put credentials in a skill bundle. Native installations are derived copies;
+publish their edits explicitly to the central library.

@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path'
 // must run before anything reads env-derived values (config file + .env fill the gaps)
 applyEnvDefaults()
 import { openDb, getMeta, type DB } from './db.ts'
-import { fullIndex } from './indexer.ts'
+import { fullIndex, reconcileSkillIndex } from './indexer.ts'
 import { localEmbedder, defaultModel } from './embed.ts'
 import { search, type MatchType } from './search.ts'
 import { startWatcher, embedAll } from './watcher.ts'
@@ -32,6 +32,7 @@ ${cmdLine('sync', 'git commit + pull + push the vault once (cron-friendly)')}
 ${cmdLine('rebuild', 'drop the index and re-sync from scratch')}
 ${cmdLine('stats', 'note/chunk/edge counts, pending embeddings')}
 ${cmdLine('agents', 'detect installed agent tools (Claude Code, Codex, pi, Cursor, …) and register the MCP server ' + dim('[--yes: no prompts] [--json: status report]'))}
+${cmdLine('skills', 'shared skills: list, import <directory>, sync, watch, status, service install|status|uninstall')}
 ${cmdLine('update', 'self-update to the latest npm release')}
 
 ${dim('git:')} --git (or OMEM_GIT=1) on watch/serve auto-commits+pushes dirty ticks and pulls
@@ -44,7 +45,7 @@ first time? run: ${cyan('omem setup')}`
 
 const KNOWN_COMMANDS = [
   'setup', 'init', 'index', 'watch', 'serve', 'search', 'doctor',
-  'sync', 'rebuild', 'stats', 'agents', 'update', 'help',
+  'sync', 'rebuild', 'stats', 'agents', 'skills', 'update', 'help',
 ]
 
 const { values, positionals } = parseArgs({
@@ -63,6 +64,17 @@ const { values, positionals } = parseArgs({
     git: { type: 'boolean' },
     'git-pull-interval': { type: 'string' },
     yes: { type: 'boolean' },
+    server: { type: 'string' },
+    query: { type: 'string' },
+    offset: { type: 'string' },
+    'expected-revision': { type: 'string' },
+    adopt: { type: 'boolean' },
+    'overwrite-local': { type: 'boolean' },
+    'legacy-windsurf': { type: 'boolean' },
+    'skills-config': { type: 'string' },
+    'skills-home': { type: 'string' },
+    'skills-state-dir': { type: 'string' },
+    interval: { type: 'string' },
   },
   allowPositionals: true,
 })
@@ -84,6 +96,12 @@ function vaultPath(): string {
 
 function dbPath(vault: string): string {
   return process.env.OMEM_DB_PATH ?? join(vault, '.omem', 'index.db')
+}
+
+function openVaultDb(vault: string): DB {
+  const db = openDb(dbPath(vault))
+  try { reconcileSkillIndex(db); return db }
+  catch (error) { db.close(); throw error }
 }
 
 // one embedder per process: the ONNX session loads once, not per file-save event
@@ -145,11 +163,16 @@ function gitPullSec(): number | undefined {
 
 async function main(): Promise<void> {
   switch (cmd) {
+    case 'skills': {
+      const { runSkillsCli } = await import('./skills/cli.ts')
+      await runSkillsCli(rest, values)
+      break
+    }
     // no args (or explicit 'repl') → interactive REPL
     case undefined:
     case 'repl': {
       const vault = vaultPath()
-      const db = openDb(dbPath(vault))
+      const db = openVaultDb(vault)
       const { startRepl } = await import('./repl.ts')
       await startRepl(db, vault, embedder)
       break
@@ -157,7 +180,7 @@ async function main(): Promise<void> {
 
     case 'index': {
       const vault = vaultPath()
-      const db = openDb(dbPath(vault))
+      const db = openVaultDb(vault)
       const sp = spin('indexing')
       const s = fullIndex(db, vault)
       sp.done()
@@ -186,7 +209,7 @@ async function main(): Promise<void> {
         process.exit(1)
       }
       const vault = vaultPath()
-      const db = openDb(dbPath(vault))
+      const db = openVaultDb(vault)
       const sp = spin(`searching "${query}"`)
       const results = await search(db, query, {
         limit: parseLimit(),
@@ -220,13 +243,13 @@ async function main(): Promise<void> {
 
     case 'watch': {
       const vault = vaultPath()
-      await startWatcher(openDb(dbPath(vault)), vault, parsePoll(0), gitPullSec(), embedder)
+      await startWatcher(openVaultDb(vault), vault, parsePoll(0), gitPullSec(), embedder)
       break
     }
 
     case 'serve': {
       const vault = vaultPath()
-      const db = openDb(dbPath(vault))
+      const db = openVaultDb(vault)
       // sync before accepting tool calls so the first search never sees an empty index;
       // embeddings fill in asynchronously via the watcher's ready-pass
       const s = fullIndex(db, vault)
@@ -285,7 +308,7 @@ async function main(): Promise<void> {
 
     case 'stats': {
       const vault = vaultPath()
-      const db = openDb(dbPath(vault))
+      const db = openVaultDb(vault)
       const one = (sql: string) => (db.prepare(sql).get() as { n: number }).n
       const row = (label: string, v: string | number) => console.log(`${dim(label.padEnd(20))}${bold(String(v))}`)
       row('notes', one('SELECT count(*) n FROM notes'))

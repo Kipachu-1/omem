@@ -10,6 +10,7 @@ import { fullIndex, indexFile, deleteNote, embedPending, SKIP_DIRS } from './ind
 import type { DB } from './db.ts'
 import type { Embedder } from './embed.ts'
 import { stamp, ok, warn, yellow, red, dim, bold, spin } from './ui.ts'
+import { isSkillPath } from './skills/paths.ts'
 
 /** One embedder per process: the ONNX session loads once, not per file-save event. */
 export async function embedAll(db: DB, embedder: Embedder): Promise<void> {
@@ -47,7 +48,7 @@ export async function startWatcher(
   const relOf = (abs: string) => relative(vault, abs).split(sep).join('/')
   const isMd = (rel: string) => rel.toLowerCase().endsWith('.md')
   const isIgnored = (abs: string) =>
-    relOf(abs)
+    isSkillPath(relOf(abs)) || relOf(abs)
       .split('/')
       .some(part => part.startsWith('.') || SKIP_DIRS.has(part))
 

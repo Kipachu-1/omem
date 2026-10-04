@@ -12,6 +12,7 @@ export interface OmemConfig {
   githubToken?: string
   embedModel?: string
   dbPath?: string
+  skillsServer?: string
 }
 
 export function configPath(): string {
@@ -64,6 +65,7 @@ export function applyEnvDefaults(): void {
   if (cfg.git === true) setIf('OMEM_GIT', '1')
   setIf('OMEM_GIT_PULL_INTERVAL', cfg.gitPullInterval?.toString())
   setIf('OMEM_EMBED_MODEL', cfg.embedModel)
+  setIf('OMEM_SKILLS_SERVER', cfg.skillsServer)
   // alias group: a real GITHUB_TOKEN/GH_TOKEN must not be outranked by the config token
   if (cfg.githubToken && !process.env.OMEM_GIT_TOKEN && !process.env.GITHUB_TOKEN && !process.env.GH_TOKEN)
     process.env.OMEM_GIT_TOKEN = cfg.githubToken

@@ -13,7 +13,8 @@ export const DEDUP_THRESHOLD = 0.78
 export const INSTRUCTIONS =
   'Shared Obsidian vault. memory_recall before acting; memory_search FIRST for prior context. ' +
   'Search before memory_write. memory_learn starts research — write each cited finding back before claiming learned. ' +
-  'memory_get_note/graph/session_show/list/status browse; memory_recent (since:lastSeen) for changes.'
+  'memory_get_note/graph/session_show/list/status browse; memory_recent (since:lastSeen) for changes. ' +
+  'skill_list before work; skill_get loads relevant skills.'
 
 /** ms-epoch windows for the `since` short forms on memory_recent. */
 export const SINCE_MS: Record<string, number> = { '1h': 3_600_000, '1d': 86_400_000, '7d': 604_800_000 }
@@ -48,7 +49,7 @@ function scrubArgs(args: unknown): unknown {
   if (!args || typeof args !== 'object') return args
   const out: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(args as Record<string, unknown>)) {
-    if (k === 'content' || k === 'frontmatter') {
+    if (k === 'content' || k === 'frontmatter' || k === 'files') {
       out[k] = '<redacted>'
       continue
     }
@@ -66,6 +67,7 @@ function countResults(result: unknown): number {
   if (Array.isArray(result)) return result.length
   if (result && typeof result === 'object') {
     const r = result as Record<string, unknown>
+    if (Array.isArray(r.skills)) return r.skills.length
     if (Array.isArray(r.notes)) return (r.notes as unknown[]).length
     if (r.grouped && typeof r.grouped === 'object') {
       const g = r.grouped as Record<string, unknown[]>
@@ -94,7 +96,8 @@ export async function withUsage<T>(tool: string, args: unknown, fn: () => Promis
     return result
   } catch (e) {
     ok = false
-    errMsg = (e as Error)?.message
+    // YAML parser diagnostics can quote uploaded skill contents.
+    errMsg = tool === 'skill_write' ? 'Skill write failed; details returned to caller' : (e as Error)?.message
     throw e
   } finally {
     const ms = Date.now() - t0

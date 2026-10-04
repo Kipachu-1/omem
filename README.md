@@ -1,6 +1,6 @@
 # omem
 
-**Memory for AI agents that lives in plain markdown.**
+**Shared memory and skills for AI agents, stored in your Obsidian vault.**
 
 You read and write it in Obsidian. Agents read and write it over MCP. Git keeps it in sync.
 No LLM, no cloud, no lock-in — just markdown, an index, and a server.
@@ -66,6 +66,126 @@ expansion, fused with Reciprocal Rank Fusion.
 
 No LLM and no external services in the pipeline. Embeddings run in-process via
 transformers.js (ONNX); the model downloads once (~30 MB) and works offline after.
+
+## Shared skills
+
+Keep reusable workflows in `skills/<name>/SKILL.md` inside the vault. Each folder
+can include scripts, references, binary assets, and client-specific metadata.
+You edit the central files; agents discover and update them over MCP. Git sync
+backs up the complete bundles. omem stores scripts without executing them.
+
+Skills use the [Agent Skills format](https://agentskills.io/specification).
+`SKILL.md` must start with YAML containing `name` and `description`. The name must
+match the folder and use lowercase letters, numbers, and single hyphens, with a
+maximum of 64 characters. The description must contain 1–1024 characters.
+Imports preserve file bytes, executable flags, and extra frontmatter.
+
+```text
+skills/
+  code-review/
+    SKILL.md
+    references/checklist.md
+    scripts/check.sh
+    assets/example.bin
+```
+
+The server adds five tools to the fourteen memory tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `skill_list` | Discover paginated names, descriptions, revisions, and invalid-bundle diagnostics. Optional `query` searches names and descriptions. |
+| `skill_get` | Load instructions and the complete file manifest. |
+| `skill_read_file` | Read a bundle-relative file at `expectedRevision`. Binary files use base64. |
+| `skill_write` | Create or patch files, with explicit `removeFiles` for deletions. |
+| `skill_archive` | Move a complete bundle into `archive/skills/` after checking its revision. |
+
+For creation, pass `expectedRevision: null`. For an update or archive, pass the
+revision returned by `skill_get`. A stale revision fails before changing files.
+Unmentioned files survive a patch. A file entry has `path`, `content`, optional
+`encoding` (`utf8` or `base64`), and optional `executable`. All skill operations
+reject paths or symlinks that escape their bundle. Skill folders and archived
+skills are excluded from memory indexing, and memory tools cannot modify them.
+
+### Import and distribute selected skills
+
+```sh
+# Import one existing folder; its original files stay intact.
+omem skills import ~/.agents/skills/code-review --vault ~/my-vault
+omem skills list --vault ~/my-vault --query review --json
+
+# Install the active library into native skill folders.
+omem skills sync --vault ~/my-vault
+omem skills status --json
+
+# Keep native copies updated from a central HTTP server, without a vault clone.
+# Set OMEM_SKILLS_TOKEN in the environment when the server requires bearer auth.
+omem skills watch --server https://your-server.example/mcp
+```
+
+Native bundles live in `~/.agents/skills/<name>/`, which recent Codex, Cursor,
+Gemini CLI, pi, OpenCode, VS Code Copilot, and Cascade clients can discover.
+Detected Claude Code installations also receive per-skill aliases in
+`~/.claude/skills/`. Names reserved by Claude (`synced` and `anthropic-skills`)
+keep their shared copy and report a native compatibility conflict instead of
+creating a Claude alias. Claude Desktop uses MCP. For a legacy Windsurf client that
+requires its private folder, add `--legacy-windsurf`. Runtime requirements and
+client-specific invocation controls remain the client's responsibility.
+
+Sync never overwrites unmanaged folders or local edits by default. It reports
+conflicts and exits unsuccessfully for a one-shot sync. Use `--adopt` to take
+ownership of an identical copy, or `--overwrite-local` to explicitly replace a
+conflicting copy after backup. Importing a replacement central bundle requires
+`--expected-revision HASH`. Native edits do not automatically upload.
+
+The watcher synchronizes immediately, then every 30 seconds. Change this with
+`--interval SECONDS`. Downloads are checked against revisions and manifests
+before installation. Connection errors, incomplete downloads, and invalid
+bundles preserve the last valid native copies. Successful sync removes only
+unchanged managed copies whose central skill disappeared or was archived.
+SQLite coordinates cooperating installers, and journals retain the evidence
+needed to recover interrupted replacements. Central writers must share the
+same configured vault index to coordinate their revision checks. External
+editors do not participate in SQLite locks; recovery preserves conflicting
+external edits for inspection.
+
+### Background updates on macOS
+
+```sh
+omem skills service install --server https://your-server.example/mcp
+omem skills service status --json
+omem skills service uninstall
+```
+
+Installation creates a user launchd service that starts at login. It saves its
+source and bearer token in an owner-only `skills-service.json` profile under
+the omem config directory. Credentials never enter process arguments or the
+LaunchAgent plist. Uninstall stops the service and removes its owned profile
+and plist; installed skills and sync history remain intact. Other platforms
+can run `omem skills watch` in the foreground.
+
+Source precedence is explicit `--server`, explicit `--vault`, an explicit
+`--skills-config` profile, then `OMEM_SKILLS_SERVER` and `OMEM_VAULT`.
+`skillsServer` in the existing omem config supplies the server environment
+default. `OMEM_SKILLS_TOKEN` takes precedence over `OMEM_HTTP_TOKEN`.
+`omem agents --json` reports native skill destinations and sync status separately
+from MCP registration. Gemini may need `/skills reload`, pi `/reload`, and
+other clients may need a session restart. Claude Code needs `/reload-skills`
+when its skills root was created after the session started.
+
+For isolated installations and tests, `--skills-home PATH` and
+`--skills-state-dir PATH` override the native destination and ownership state.
+Native discovery depends on the installed client version. Test shared-folder
+and Claude-alias coexistence before relying on a particular client release.
+See the discovery rules for [Codex](https://learn.chatgpt.com/docs/build-skills),
+[Claude Code](https://code.claude.com/docs/en/skills), and
+[Cascade](https://docs.devin.ai/desktop/cascade/skills).
+
+Run `npm run verify:skills -- gemini opencode codex` for repeatable native checks in
+temporary projects. The check covers discovery, alias coexistence, updates,
+removal, reference reading, and a harmless script. Gemini 0.38.2, OpenCode
+1.4.10, and bundled Codex CLI 0.160.0 passed these checks. Other clients need
+equivalent picker checks in an isolated project; older clients may require an
+upgrade for native skill support.
 
 ## Why omem
 

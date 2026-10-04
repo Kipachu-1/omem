@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { parseNote, type ParsedNote } from './parser.ts'
 import { getMeta, setMeta, type DB } from './db.ts'
 import { vecToBuf, type Embedder } from './embed.ts'
+import { isSkillPath } from './skills/paths.ts'
 
 export const SKIP_DIRS = new Set(['.obsidian', '.trash', '.omem', 'node_modules'])
 
@@ -13,6 +14,7 @@ export function walkVault(vault: string): string[] {
     for (const e of readdirSync(join(vault, rel), { withFileTypes: true })) {
       if (e.name.startsWith('.') || SKIP_DIRS.has(e.name)) continue
       const relPath = rel ? `${rel}/${e.name}` : e.name
+      if (isSkillPath(relPath)) continue
       if (e.isDirectory()) rec(relPath)
       else if (e.name.toLowerCase().endsWith('.md')) out.push(relPath)
     }
@@ -21,8 +23,19 @@ export function walkVault(vault: string): string[] {
   return out.sort()
 }
 
+export function reconcileSkillIndex(db: DB): void {
+  const paths = db.prepare<[], { path: string }>(
+    "SELECT path FROM notes WHERE path LIKE 'skills/%' OR path LIKE 'archive/skills/%'",
+  ).all()
+  if (paths.length) db.transaction(() => { for (const { path } of paths) deleteNote(db, path) })()
+}
+
 /** Index one file. Returns false if unchanged (hash match). */
 export function indexFile(db: DB, vault: string, relPath: string): boolean {
+  if (isSkillPath(relPath)) {
+    deleteNote(db, relPath)
+    return false
+  }
   const abs = join(vault, relPath)
   const raw = readFileSync(abs, 'utf8')
   const hash = createHash('sha256').update(raw).digest('hex')

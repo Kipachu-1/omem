@@ -5,6 +5,7 @@ import type { DB } from '../db.ts'
 import { commitNotes, retargetHistory } from '../note-write.ts'
 import { indexFile, embedPending, SKIP_DIRS } from '../indexer.ts'
 import type { Embedder } from '../embed.ts'
+import { isSkillPath } from '../skills/paths.ts'
 
 export interface ToolCtx {
   db: DB
@@ -57,6 +58,7 @@ export function buildToolCtx(
   // the watcher and full-sync sweep skip hidden/system folders; writing there would
   // create notes that get silently un-indexed by the next sweep (or clobber .omem/.obsidian)
   const assertIndexable = (rel: string): void => {
+    if (isSkillPath(rel)) throw new Error(`path is reserved for skill operations: ${rel}`)
     const parts = rel.split('/')
     if (!rel.toLowerCase().endsWith('.md') || parts.some(s => s.startsWith('.') || SKIP_DIRS.has(s)))
       throw new Error(`path is not indexable (hidden or system folder): ${rel}`)

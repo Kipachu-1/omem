@@ -32,6 +32,7 @@
     "test": "node --test \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "benchmark:retrieval": "node scripts/retrieval-benchmark.ts",
+    "verify:skills": "node scripts/verify-native-skills.mjs",
     "prepack": "tsc -p tsconfig.build.json"
   },
   "engines": {

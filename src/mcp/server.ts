@@ -13,6 +13,8 @@ import { registerBrowseTools } from './tools/browse/index.ts'
 import { registerWriteTools } from './tools/write.ts'
 import { registerLearnTools } from './tools/learn.ts'
 import { registerOpsTools } from './tools/ops.ts'
+import { registerSkillTools } from './tools/skills.ts'
+import { reconcileSkillIndex } from '../indexer.ts'
 
 /**
  * Stable client identity for a stdio serve process: an explicit env override wins (lets agents
@@ -57,6 +59,7 @@ export function buildServer(
   embedder: Embedder,
   getClientName: () => string = stdioClientName,
 ): McpServer {
+  reconcileSkillIndex(db)
   const ctx = buildToolCtx(db, vault, embedder, getClientName)
   const server = new McpServer({ name: 'omem', version: pkgVersion }, { instructions: INSTRUCTIONS })
   registerSearchTools(server, ctx)
@@ -64,6 +67,7 @@ export function buildServer(
   registerWriteTools(server, ctx)
   registerLearnTools(server, ctx)
   registerOpsTools(server, ctx)
+  registerSkillTools(server, ctx)
   return server
 }
 

@@ -56,6 +56,7 @@ test('server advertises memory-usage instructions', async () => {
   assert.ok(instructions!.length > 0, 'instructions must be non-empty')
   assert.ok(instructions!.includes('memory_search'), 'instructions must nudge memory_search')
   assert.ok(instructions!.includes('memory_learn starts research'), 'learn is start, not finish')
+  assert.ok(instructions!.includes('skill_list'), 'instructions must guide skill discovery')
   assert.ok(instructions!.length <= 400, `instructions must stay under ~400 chars (got ${instructions!.length})`)
 })
 
@@ -66,11 +67,11 @@ test('server advertises the package version', async () => {
   assert.equal(v!.version, pkg.version, 'advertised version must match package.json')
 })
 
-test('exposes exactly the fourteen memory tools', async () => {
+test('exposes fourteen memory tools and five skill tools', async () => {
   const { tools } = await client.listTools()
   assert.deepEqual(
     tools.map(t => t.name).sort(),
-    ['memory_archive', 'memory_get_note', 'memory_graph', 'memory_learn', 'memory_list', 'memory_move', 'memory_recall', 'memory_recent', 'memory_search', 'memory_session_show', 'memory_status', 'memory_sync', 'memory_usage', 'memory_write'],
+    ['memory_archive', 'memory_get_note', 'memory_graph', 'memory_learn', 'memory_list', 'memory_move', 'memory_recall', 'memory_recent', 'memory_search', 'memory_session_show', 'memory_status', 'memory_sync', 'memory_usage', 'memory_write', 'skill_archive', 'skill_get', 'skill_list', 'skill_read_file', 'skill_write'],
   )
 })
 

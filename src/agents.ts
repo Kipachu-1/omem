@@ -4,6 +4,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } fr
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { dim, ok, warn } from './ui.ts'
+import { getSkillsSyncStatus } from './skills/sync.ts'
 
 const run = promisify(execFile)
 const home = (...p: string[]) => join(homedir(), ...p)
@@ -180,12 +181,32 @@ export interface AgentStatus {
   detected: boolean
   state: AgentState
   config?: string
+  skills: { mode: 'native' | 'mcp'; directory?: string; managed: number; conflicts: number; reload?: string; error?: string }
 }
 
 /** every known agent with its detected flag and registration state */
 export async function agentsStatus(): Promise<AgentStatus[]> {
   const found = await detectAgents()
-  return AGENTS.map(a => ({ name: a.name, detected: found.includes(a), state: a.state?.() ?? 'unknown', config: a.config }))
+  let status: ReturnType<typeof getSkillsSyncStatus> = { installed: [], last: null }
+  let skillsError: string | undefined
+  try { status = getSkillsSyncStatus() }
+  catch (error) { skillsError = error instanceof Error ? error.message : String(error) }
+  const shared = home('.agents', 'skills')
+  return AGENTS.map(a => {
+    const directory = a.name === 'Claude Desktop' ? undefined : a.name === 'Claude Code' ? home('.claude', 'skills') : shared
+    const managed = a.name === 'Claude Desktop' ? 0 : a.name === 'Claude Code' ?
+      status.installed.filter(skill => skill.aliases.some(alias => alias.path.startsWith(directory + '/'))).length : status.installed.length
+    const last = status.last?.result
+    const conflicts = last && typeof last === 'object' && 'conflicts' in last && Array.isArray(last.conflicts) ? last.conflicts.length : 0
+    const reload = a.name === 'Gemini CLI' ? '/skills reload' : a.name === 'pi' ? '/reload' :
+      a.name === 'Claude Code' ? '/reload-skills if the skills root was created during the session' :
+        directory ? 'Restart the session if changes do not appear' : undefined
+    return { name: a.name, detected: found.includes(a), state: a.state?.() ?? 'unknown', config: a.config,
+      skills: { mode: directory ? 'native' : 'mcp', directory, managed, conflicts: directory ? conflicts : 0, reload,
+        ...(directory && skillsError ? { error: skillsError } : {}),
+      },
+    }
+  })
 }
 
 /** Detect installed agents and offer to register the MCP server in each (already-registered ones are skipped). */
