@@ -2,9 +2,10 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { join, dirname, isAbsolute } from 'node:path'
 import { dim, ok, warn } from './ui.ts'
 import { getSkillsSyncStatus } from './skills/sync.ts'
+import { fileURLToPath } from 'node:url'
 
 const run = promisify(execFile)
 const home = (...p: string[]) => join(homedir(), ...p)
@@ -70,6 +71,7 @@ export const mcpJson =
   (path: string) =>
   async (cmd: string[]): Promise<string> => {
     const cfg = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {}
+    if (existsSync(path)) writeFileSync(`${path}.omem-backup`, readFileSync(path))
     cfg.mcpServers = { ...cfg.mcpServers, omem: { command: cmd[0], args: cmd.slice(1) } }
     mkdirSync(dirname(path), { recursive: true })
     writeFileSync(path, JSON.stringify(cfg, null, 2) + '\n')
@@ -83,21 +85,27 @@ const mcpJsonAgent = (path: string): Pick<Agent, 'config' | 'state' | 'register'
   register: mcpJson(path),
 })
 
-const codexToml = async (cmd: string[]): Promise<string> => {
-  const path = home('.codex', 'config.toml')
+export async function registerCodex(path: string, cmd: string[]): Promise<string> {
   const cur = existsSync(path) ? readFileSync(path, 'utf8') : ''
-  if (tomlRegistered(path) === 'registered') return `${path} (already registered)`
+  const section = `[mcp_servers.omem]\ncommand = ${JSON.stringify(cmd[0])}\nargs = ${JSON.stringify(cmd.slice(1))}\nstartup_timeout_sec = 120\n`
+  if (tomlRegistered(path) === 'registered') {
+    writeFileSync(`${path}.omem-backup`, cur)
+    writeFileSync(path, cur.replace(/^\[mcp_servers\.omem\][\s\S]*?(?=^\[|$(?![\s\S]))/m, () => section))
+    return `${path} (repaired; backup saved)`
+  }
   mkdirSync(dirname(path), { recursive: true })
   appendFileSync(
     path,
-    `${cur && !cur.endsWith('\n') ? '\n' : ''}\n[mcp_servers.omem]\ncommand = ${JSON.stringify(cmd[0])}\nargs = ${JSON.stringify(cmd.slice(1))}\n`,
+    `${cur && !cur.endsWith('\n') ? '\n' : ''}\n${section}`,
   )
   return path
 }
+const codexToml = (cmd: string[]): Promise<string> => registerCodex(home('.codex', 'config.toml'), cmd)
 
 const opencodeJson = async (cmd: string[]): Promise<string> => {
   const path = home('.config', 'opencode', 'opencode.json')
   const cfg = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : { $schema: 'https://opencode.ai/config.json' }
+  if (existsSync(path)) writeFileSync(`${path}.omem-backup`, readFileSync(path))
   cfg.mcp = { ...cfg.mcp, omem: { type: 'local', command: cmd, enabled: true } }
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, JSON.stringify(cfg, null, 2) + '\n')
@@ -164,9 +172,13 @@ export const AGENTS: Agent[] = [
   },
 ]
 
-/** ['omem','serve'] when globally installed, npx fallback otherwise */
+/** Absolute Node and package entry point work with GUI clients' minimal PATH. */
 export async function serveCmd(): Promise<string[]> {
-  return (await hasBin('omem')) ? ['omem', 'serve'] : ['npx', '-y', '@kipachu/omem', 'serve']
+  const entry = fileURLToPath(new URL('../bin/omem.mjs', import.meta.url))
+  if (entry.split(/[\\/]/).includes('_npx'))
+    throw new Error('Cannot register a temporary npx installation. Install persistently with npm install -g @kipachu/omem, then run omem agents.')
+  if (!existsSync(entry)) throw new Error(`Omem entry point not found: ${entry}`)
+  return [process.execPath, entry, 'serve', ...(process.env.OMEM_VAULT ? ['--vault', process.env.OMEM_VAULT] : [])]
 }
 
 export async function detectAgents(): Promise<Agent[]> {
@@ -181,6 +193,8 @@ export interface AgentStatus {
   detected: boolean
   state: AgentState
   config?: string
+  connection: 'not_verified'
+  launch: { status: 'launchable' | 'broken' | 'unknown'; detail?: string }
   skills: { mode: 'native' | 'mcp'; directory?: string; managed: number; conflicts: number; reload?: string; error?: string }
 }
 
@@ -192,7 +206,7 @@ export async function agentsStatus(): Promise<AgentStatus[]> {
   try { status = getSkillsSyncStatus() }
   catch (error) { skillsError = error instanceof Error ? error.message : String(error) }
   const shared = home('.agents', 'skills')
-  return AGENTS.map(a => {
+  return Promise.all(AGENTS.map(async a => {
     const directory = a.name === 'Claude Desktop' ? undefined : a.name === 'Claude Code' ? home('.claude', 'skills') : shared
     const managed = a.name === 'Claude Desktop' ? 0 : a.name === 'Claude Code' ?
       status.installed.filter(skill => skill.aliases.some(alias => alias.path.startsWith(directory + '/'))).length : status.installed.length
@@ -201,16 +215,47 @@ export async function agentsStatus(): Promise<AgentStatus[]> {
     const reload = a.name === 'Gemini CLI' ? '/skills reload' : a.name === 'pi' ? '/reload' :
       a.name === 'Claude Code' ? '/reload-skills if the skills root was created during the session' :
         directory ? 'Restart the session if changes do not appear' : undefined
-    return { name: a.name, detected: found.includes(a), state: a.state?.() ?? 'unknown', config: a.config,
+    return { name: a.name, detected: found.includes(a), state: a.state?.() ?? 'unknown', config: a.config, connection: 'not_verified' as const, launch: await checkLaunch(a.config),
       skills: { mode: directory ? 'native' : 'mcp', directory, managed, conflicts: directory ? conflicts : 0, reload,
         ...(directory && skillsError ? { error: skillsError } : {}),
       },
     }
-  })
+  }))
+}
+
+/** Static launch validation is deliberately separate from a live MCP handshake. */
+export async function checkLaunch(path?: string): Promise<AgentStatus['launch']> {
+  if (!path || !existsSync(path)) return { status: 'unknown', detail: 'No readable launch configuration' }
+  try {
+    const text = readFileSync(path, 'utf8')
+    let command: unknown
+    let args: unknown
+    if (path.endsWith('.toml')) {
+      const section = text.match(/^\[mcp_servers\.omem\]([\s\S]*?)(?=^\[|$(?![\s\S]))/m)?.[1]
+      const value = section?.match(/^command\s*=\s*(.+)$/m)?.[1]?.trim()
+      command = value?.startsWith("'") ? value.slice(1, -1) : value ? JSON.parse(value) : undefined
+      const rawArgs = section?.match(/^args\s*=\s*(\[.*\])$/m)?.[1]
+      if (rawArgs) {
+        try { args = JSON.parse(rawArgs) } catch { /* non-JSON TOML arrays remain unverified */ }
+      }
+    } else {
+      const config = JSON.parse(text)
+      const entry = config.mcpServers?.omem ?? config.mcp?.omem
+      command = Array.isArray(entry?.command) ? entry.command[0] : entry?.command
+      args = Array.isArray(entry?.command) ? entry.command.slice(1) : entry?.args
+      if (entry?.url) return { status: 'unknown', detail: 'Remote endpoint requires a live handshake' }
+    }
+    if (typeof command !== 'string' || !command) return { status: 'unknown', detail: 'Launch command could not be parsed' }
+    if (!(isAbsolute(command) ? existsSync(command) : await hasBin(command)))
+      return { status: 'broken', detail: 'Executable is missing or not on PATH; run omem agents --repair --yes' }
+    if (Array.isArray(args) && typeof args[0] === 'string' && /\.(mjs|cjs|js|ts)$/.test(args[0]) && isAbsolute(args[0]) && !existsSync(args[0]))
+      return { status: 'broken', detail: 'Configured script is missing' }
+    return { status: 'launchable', detail: 'Executable found; MCP handshake and client reload not verified' }
+  } catch { return { status: 'unknown', detail: 'Configuration cannot be read or parsed' } }
 }
 
 /** Detect installed agents and offer to register the MCP server in each (already-registered ones are skipped). */
-export async function offerAgents(yes: (q: string) => Promise<boolean>, found?: Agent[]): Promise<void> {
+export async function offerAgents(yes: (q: string) => Promise<boolean>, found?: Agent[], repair = false): Promise<void> {
   const list = found ?? (await detectAgents())
   if (!list.length) {
     console.error(dim('no known agent tools detected — register manually with: <agent> mcp add omem -- omem serve'))
@@ -219,8 +264,8 @@ export async function offerAgents(yes: (q: string) => Promise<boolean>, found?: 
   const cmd = await serveCmd()
   console.error(`detected: ${list.map(a => a.name).join(', ')}`)
   for (const a of list) {
-    if (a.state?.() === 'registered') {
-      console.error(dim(`  ${a.name}: already registered, skipping`))
+    if (a.state?.() === 'registered' && !repair) {
+      console.error(dim(`  ${a.name}: configured; connection not verified. Use omem agents --repair --yes to refresh registration.`))
       continue
     }
     if (!(await yes(`  register omem MCP in ${a.name}?`))) continue

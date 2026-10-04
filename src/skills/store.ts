@@ -1,5 +1,6 @@
+import { durable } from './durable.ts'
 import { randomUUID } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import type { DB } from '../db.ts'
@@ -38,10 +39,6 @@ function details(bundle: SkillBundle): SkillDetails {
   return result
 }
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error) }
-function durable(path: string): void {
-  const fd = openSync(path, 'r')
-  try { fsyncSync(fd) } finally { closeSync(fd) }
-}
 function durableTree(directory: string): void {
   for (const child of readdirSync(directory)) {
     const path = resolve(directory, child)

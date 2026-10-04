@@ -1,8 +1,9 @@
+import { durable } from './durable.ts'
 import Database from 'better-sqlite3'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve, relative, isAbsolute, parse } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, readdirSync, renameSync, rmSync, symlinkSync, openSync, closeSync, fsyncSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, readdirSync, renameSync, rmSync, symlinkSync } from 'node:fs'
 import { z } from 'zod'
 import { createBundle, readBundle, writeBundle, skillNameSchema } from './bundle.ts'
 import type { SkillBundle } from './bundle.ts'
@@ -154,13 +155,11 @@ function recover(db: Database.Database, home: string) {
 function flush(path: string) {
   if (lstatSync(path).isSymbolicLink()) return
   if (lstatSync(path).isDirectory()) for (const entry of readdirSync(path)) flush(join(path, entry))
-  const descriptor = openSync(path, 'r')
-  try { fsyncSync(descriptor) } catch (error) { if (process.platform !== 'win32') throw error } finally { closeSync(descriptor) }
+  durable(path)
 }
 function flushParents(operations: Operation[]) {
   for (const parent of new Set(operations.map(op => dirname(op.target)))) {
-    const descriptor = openSync(parent, 'r')
-    try { fsyncSync(descriptor) } catch (error) { if (process.platform !== 'win32') throw error } finally { closeSync(descriptor) }
+    durable(parent)
   }
 }
 function publish(db: Database.Database, home: string, name: string, next: Owned | null, operations: Operation[], preserveBackup: boolean, report: SyncReport) {

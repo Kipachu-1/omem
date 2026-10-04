@@ -26,8 +26,9 @@ export interface DoctorReport {
   db: boolean
   gitRemote: string | null
   embedModel: string | null
-  pendingEmbeddings: number
-  totalChunks: number
+  pendingEmbeddings: number | null
+  totalChunks: number | null
+  errors: { operation: string; code: string }[]
   httpToken: boolean
   lastSync: number | null
   lastSyncAge: string | null
@@ -39,8 +40,9 @@ export async function checkDoctor(vault: string): Promise<DoctorReport> {
   let db: DB | null = null
   let dbOk = false
   let embedModel: string | null = null
-  let pendingEmbeddings = 0
-  let totalChunks = 0
+  let pendingEmbeddings: number | null = null
+  let totalChunks: number | null = null
+  const errors: DoctorReport['errors'] = []
   let lastSync: number | null = null
   let health: MemoryHealth | null = null
 
@@ -55,8 +57,10 @@ export async function checkDoctor(vault: string): Promise<DoctorReport> {
       pendingEmbeddings = (
         db.prepare('SELECT COUNT(*) AS c FROM chunks WHERE embedding IS NULL').get() as { c: number }
       ).c
-    } catch {
+    } catch (error) {
       dbOk = false
+      pendingEmbeddings = totalChunks = null
+      errors.push({ operation: 'open/read index', code: String((error as NodeJS.ErrnoException).code ?? 'UNKNOWN') })
     } finally {
       db?.close()
     }
@@ -76,8 +80,9 @@ export async function checkDoctor(vault: string): Promise<DoctorReport> {
         /\.git$/,
         '',
       )
-    } catch {
+    } catch (error) {
       gitRemote = null
+      errors.push({ operation: 'read git remote', code: String((error as NodeJS.ErrnoException).code ?? 'UNKNOWN') })
     }
   }
 
@@ -104,6 +109,7 @@ export async function checkDoctor(vault: string): Promise<DoctorReport> {
     lastSync,
     lastSyncAge,
     health,
+    errors,
   }
 }
 
@@ -133,7 +139,7 @@ export async function runDoctor(vault: string): Promise<DoctorReport> {
     row(
       'embed model',
       !!r.embedModel,
-      r.embedModel ? dim(r.embedModel) : yellow('not indexed yet (run: omem index)'),
+      r.embedModel ? dim(r.embedModel) : yellow(r.db ? 'not indexed yet (run: omem index)' : 'unknown: resolve the database error first'),
     ),
   )
   // pending embeddings
@@ -142,7 +148,9 @@ export async function runDoctor(vault: string): Promise<DoctorReport> {
     row(
       'embeddings',
       embedComplete,
-      r.totalChunks === 0
+      r.totalChunks === null
+        ? yellow('unknown: index could not be read; check database errors')
+        : r.totalChunks === 0
         ? dim('no chunks')
         : r.pendingEmbeddings === 0
           ? dim(`all ${r.totalChunks} embedded`)
@@ -178,6 +186,7 @@ export async function runDoctor(vault: string): Promise<DoctorReport> {
       if (finding.count > finding.items.length) console.error(dim(`    … and ${finding.count - finding.items.length} more`))
     }
   }
+  for (const error of r.errors) console.error(yellow(`  ${error.operation}: ${error.code}`))
   const knowledgeGood = r.health && Object.values(r.health).every(v => typeof v !== 'object' || !v || !('count' in v) || v.count === 0)
   const allGood = knowledgeGood && r.vault && r.db && r.gitRemote && r.embedModel && embedComplete && r.httpToken
   console.error('')

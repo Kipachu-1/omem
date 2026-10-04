@@ -1,11 +1,9 @@
 #!/usr/bin/env node
-import { applyEnvDefaults } from './config.ts'
+import { applyEnvDefaults, configReadError } from './config.ts'
 import { parseArgs } from 'node:util'
 import { existsSync, rmSync, readFileSync, statSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
-// must run before anything reads env-derived values (config file + .env fill the gaps)
-applyEnvDefaults()
 import { openDb, getMeta, type DB } from './db.ts'
 import { fullIndex, reconcileSkillIndex } from './indexer.ts'
 import { localEmbedder, defaultModel } from './embed.ts'
@@ -31,7 +29,7 @@ ${cmdLine('doctor', 'health check — vault, db, git, embeddings, HTTP token, la
 ${cmdLine('sync', 'git commit + pull + push the vault once (cron-friendly)')}
 ${cmdLine('rebuild', 'drop the index and re-sync from scratch')}
 ${cmdLine('stats', 'note/chunk/edge counts, pending embeddings')}
-${cmdLine('agents', 'detect installed agent tools (Claude Code, Codex, pi, Cursor, …) and register the MCP server ' + dim('[--yes: no prompts] [--json: status report]'))}
+${cmdLine('agents', 'detect and register agent tools ' + dim('[--yes: no prompts] [--repair: refresh existing entries] [--json: configuration and launch status]'))}
 ${cmdLine('skills', 'shared skills: list, import <directory>, sync, watch, status, service install|status|uninstall')}
 ${cmdLine('update', 'self-update to the latest npm release')}
 
@@ -48,7 +46,14 @@ const KNOWN_COMMANDS = [
   'sync', 'rebuild', 'stats', 'agents', 'skills', 'update', 'help',
 ]
 
-const { values, positionals } = parseArgs({
+if (process.argv.slice(2).some(arg => arg === '--help' || arg === '-h') || process.argv[2] === 'help') {
+  console.log(USAGE)
+  process.exit(0)
+}
+// Fill environment defaults before constructing the embedder or opening a vault.
+applyEnvDefaults()
+
+const { values, positionals } = (() => { try { return parseArgs({
   options: {
     vault: { type: 'string' },
     json: { type: 'boolean' },
@@ -64,6 +69,7 @@ const { values, positionals } = parseArgs({
     git: { type: 'boolean' },
     'git-pull-interval': { type: 'string' },
     yes: { type: 'boolean' },
+    repair: { type: 'boolean' },
     server: { type: 'string' },
     query: { type: 'string' },
     offset: { type: 'string' },
@@ -77,14 +83,19 @@ const { values, positionals } = parseArgs({
     interval: { type: 'string' },
   },
   allowPositionals: true,
-})
+}) } catch (error) {
+  console.error(`omem: ${(error as Error).message}. Run omem --help for usage.`)
+  process.exit(1)
+} })()
 
 const [cmd, ...rest] = positionals
 
 function vaultPath(): string {
   const v = values.vault ?? process.env.OMEM_VAULT
   if (!v) {
-    fail(`no vault — pass --vault <path>, set OMEM_VAULT, or run: ${cyan('omem setup')}`)
+    fail(configReadError()
+      ? `vault could not be resolved because ${configReadError()}. Fix config access or pass --vault <path>.`
+      : `no vault — pass --vault <path>, set OMEM_VAULT, or run: ${cyan('omem setup')}`)
     process.exit(1)
   }
   if (!existsSync(v)) {
@@ -330,7 +341,7 @@ async function main(): Promise<void> {
       }
       if (values.yes) {
         // non-interactive: register every detected agent that isn't already registered
-        await offerAgents(async () => true)
+        await offerAgents(async () => true, undefined, values.repair)
         break
       }
       if (!process.stdin.isTTY) {
@@ -343,7 +354,7 @@ async function main(): Promise<void> {
         for (const a of found) {
           const st = a.state?.() ?? 'unknown'
           const label =
-            st === 'registered' ? green('registered') : st === 'missing' ? yellow('not registered') : dim('unknown')
+            st === 'registered' ? green('configured (connection not verified)') : st === 'missing' ? yellow('not registered') : dim('unknown')
           console.log(`${a.name} ${label}${a.config ? dim(` — ${a.config}`) : ''}`)
         }
         break
@@ -363,7 +374,7 @@ async function main(): Promise<void> {
           rl.once('close', () => res(''))
         })
         return ['y', 'yes'].includes(line.trim().toLowerCase())
-      })
+      }, undefined, values.repair)
       rl.close()
       break
     }

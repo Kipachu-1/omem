@@ -13,10 +13,7 @@ No LLM, no cloud, no lock-in — just markdown, an index, and a server.
 ## Install
 
 ```sh
-# one-shot: install, pick a vault, index, register with your MCP client
-npx -y @kipachu/omem setup
-
-# or manual
+# install persistently so MCP clients have a stable launch path
 npm i -g @kipachu/omem
 omem init ~/my-vault   # template vault (or point at an existing one)
 omem setup             # wire it up
@@ -68,6 +65,33 @@ No LLM and no external services in the pipeline. Embeddings run in-process via
 transformers.js (ONNX); the model downloads once (~30 MB) and works offline after.
 
 ## Shared skills
+
+### Windows and connection troubleshooting
+
+`omem agents --json` distinguishes configuration presence (`state`) from executable
+availability (`launch`). `connection: "not_verified"` means no live handshake was
+performed; a saved entry alone does not prove the client has connected.
+
+After moving or reinstalling Omem, use `omem agents --repair --yes` to refresh
+detected clients. Existing file configurations are backed up beside the originals
+with an `.omem-backup` suffix. Restart the client/session to load changes.
+Registration uses absolute Node and Omem entry paths with the configured vault.
+A temporary npx installation must be installed persistently first:
+`npm install -g @kipachu/omem`, then `omem agents`.
+
+On Windows, directory fsync is unsupported and is skipped; regular files are still
+flushed and their errors propagate. Windows-written bundles preserve executable
+flags in the reserved `.omem-executables.json` metadata file. Keep this file with
+the bundle when copying or syncing it, including through Git. It is not exposed
+as a skill asset; when present it supplies the declared executable flags across
+platforms. Omem does not execute scripts. Unix bundles without this metadata use
+filesystem executable bits as before.
+
+`omem --help`, `omem -h`, and subcommand help work without a vault configuration.
+Doctor returns null counters when it cannot read the index and reports operation
+error codes rather than treating failed reads as an empty vault. An inaccessible
+configuration is reported separately from invalid JSON; repair access before
+running setup or rebuilding an existing index.
 
 Keep reusable workflows in `skills/<name>/SKILL.md` inside the vault. Each folder
 can include scripts, references, binary assets, and client-specific metadata.

@@ -32,7 +32,7 @@ test('bundles preserve raw frontmatter, binary bytes, executable scripts, and re
   assert.equal(copied.revision, original.revision)
   assert.equal(copied.files.find(file => file.path === 'SKILL.md')?.content, files[0].content)
   assert.deepEqual(readFileSync(join(directory, 'assets/blob.bin')), Buffer.from([255, 0, 1, 255]))
-  assert.equal(lstatSync(join(directory, 'scripts/run.sh')).mode & 0o111, 0o111)
+  if (process.platform !== 'win32') assert.equal(lstatSync(join(directory, 'scripts/run.sh')).mode & 0o111, 0o111)
   assert.equal(copied.instructions, '\n# Instructions\n\nRun the helper.\n')
   assert.throws(() => writeBundle(directory, files), /already exists/)
 })

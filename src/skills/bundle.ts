@@ -4,6 +4,8 @@ import { basename, dirname, relative, resolve, sep } from 'node:path'
 import matter from 'gray-matter'
 import { z } from 'zod'
 
+const executableMetadata = '.omem-executables.json'
+
 export const skillNameSchema = z.string().min(1).max(64).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'Skill names must use lowercase letters, numbers, and single hyphens')
 export const skillPathSchema = z.string().min(1).refine(path => !path.includes('\\') && !path.startsWith('/') && !/^[A-Za-z]:/.test(path) && !path.includes('\0') && path.split('/').every(part => part !== '' && part !== '.' && part !== '..'), 'File paths must be POSIX relative paths without traversal')
 export const skillFileSchema = z.object({
@@ -30,6 +32,7 @@ function validatePaths(files: SkillFile[]): void {
   const paths = new Map<string, string>()
   const prefixes = new Map<string, string>()
   for (const file of files) {
+    if (file.path.split('/')[0].toLowerCase() === executableMetadata) throw new Error('File path is reserved for executable metadata')
     const folded = file.path.normalize('NFC').toLowerCase()
     if (paths.has(folded)) throw new Error(`Duplicate or case-colliding file path: ${file.path}`)
     paths.set(folded, file.path)
@@ -79,6 +82,13 @@ export function readBundle(directory: string, expectedName = basename(resolve(di
   const root = realpathSync(directory)
   if (!lstatSync(root).isDirectory()) throw new Error('Skill bundle must be a directory')
   const files: SkillFile[] = []
+  const metadataPath = resolve(root, executableMetadata)
+  let executables: Set<string> | undefined
+  if (existsSync(metadataPath)) {
+    const stat = lstatSync(metadataPath)
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Executable metadata must be a regular file')
+    executables = new Set(z.array(skillPathSchema).parse(JSON.parse(readFileSync(metadataPath, 'utf8'))))
+  }
   const ancestors = new Set<string>()
   function walk(path: string, prefix: string): void {
     const canonical = realpathSync(path)
@@ -88,7 +98,10 @@ export function readBundle(directory: string, expectedName = basename(resolve(di
     if (stat.isDirectory()) {
       if (ancestors.has(canonical)) throw new Error(`Symlink cycle in skill bundle: ${prefix}`)
       ancestors.add(canonical)
-      for (const child of readdirSync(canonical).sort()) walk(resolve(canonical, child), prefix ? `${prefix}/${child}` : child)
+      for (const child of readdirSync(canonical).sort()) {
+        if (!prefix && child === executableMetadata) continue
+        walk(resolve(canonical, child), prefix ? `${prefix}/${child}` : child)
+      }
       ancestors.delete(canonical)
     } else if (stat.isFile()) {
       const bytes = readFileSync(canonical)
@@ -96,10 +109,11 @@ export function readBundle(directory: string, expectedName = basename(resolve(di
       let encoding: SkillFile['encoding'] = 'utf8'
       try { content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) }
       catch { content = bytes.toString('base64'); encoding = 'base64' }
-      files.push({ path: prefix, content, encoding, executable: (stat.mode & 0o111) !== 0 })
+      files.push({ path: prefix, content, encoding, executable: executables !== undefined ? executables.has(prefix) : (stat.mode & 0o111) !== 0 })
     } else throw new Error(`Unsupported file in skill bundle: ${prefix}`)
   }
   walk(root, '')
+  if (executables && [...executables].some(path => !files.some(file => file.path === path))) throw new Error('Executable metadata refers to a missing file')
   return createBundle(files, expectedName)
 }
 
@@ -114,4 +128,6 @@ export function writeBundle(directory: string, input: SkillFile[]): void {
     writeFileSync(target, bytesFor(file), { flag: 'wx', mode: file.executable ? 0o755 : 0o644 })
     chmodSync(target, file.executable ? 0o755 : 0o644)
   }
+  if (process.platform === 'win32')
+    writeFileSync(resolve(directory, executableMetadata), JSON.stringify(bundle.files.filter(file => file.executable).map(file => file.path)), { flag: 'wx' })
 }

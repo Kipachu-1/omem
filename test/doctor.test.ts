@@ -63,7 +63,7 @@ test('checkDoctor: vault exists, db opens, no git remote, no embed model, no tok
   assert.equal(r.embedModel, null, 'no embed model yet (no embedding run)')
   assert.equal(r.httpToken, false, 'OMEM_HTTP_TOKEN not set in test env')
   assert.equal(r.lastSync, null, 'no last sync')
-  assert.ok(r.totalChunks > 0, 'should have chunks after indexing')
+  assert.ok(r.totalChunks !== null && r.totalChunks > 0, 'should have chunks after indexing')
 })
 
 test('checkDoctor: git remote after git init + remote add', async () => {

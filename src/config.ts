@@ -20,13 +20,19 @@ export function configPath(): string {
 }
 
 const expand = (p: string): string => (p === '~' || p.startsWith('~/') ? join(homedir(), p.slice(1)) : p)
+let configError: string | undefined
+export function configReadError(): string | undefined { return configError }
 
 export function readConfigFile(): OmemConfig {
+  configError = undefined
   try {
     return JSON.parse(readFileSync(configPath(), 'utf8')) as OmemConfig
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT')
-      console.error(`omem: ignoring malformed config at ${configPath()}: ${(e as Error).message}`)
+    const code = (e as NodeJS.ErrnoException).code
+    if (code !== 'ENOENT') {
+      configError = `${e instanceof SyntaxError ? 'invalid JSON in' : 'cannot read'} config at ${configPath()}${code ? ` (${code})` : ''}`
+      console.error(`omem: ${configError}. Check the file and access permissions; existing configuration was not changed.`)
+    }
     return {}
   }
 }
