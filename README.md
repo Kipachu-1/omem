@@ -31,7 +31,7 @@ No vault yet? [`template/`](./template) is a ready-to-use starting structure:
 per-domain `islands/`, `inbox/` for triage, `archive/` for superseded notes, and
 [`CONVENTIONS.md`](./template/CONVENTIONS.md) that teaches agents the write rules.
 
-> **Development checkout:** the retrieval, update, research, and health improvements below are unreleased. The package version is 0.10.0.
+> **Development checkout:** the retrieval, update, research, and health improvements below are unreleased. The package version is 0.11.0.
 
 ## How it works
 
