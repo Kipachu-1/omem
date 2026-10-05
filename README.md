@@ -28,7 +28,7 @@ No vault yet? [`template/`](./template) is a ready-to-use starting structure:
 per-domain `islands/`, `inbox/` for triage, `archive/` for superseded notes, and
 [`CONVENTIONS.md`](./template/CONVENTIONS.md) that teaches agents the write rules.
 
-> **Development checkout:** the retrieval, update, research, and health improvements below are unreleased. The package version is 0.11.0.
+Shared skills are available starting with [v0.11.0](https://www.npmjs.com/package/@kipachu/omem/v/0.11.0). See [Shared skills](#shared-skills) for MCP tools, imports, native sync, and background service setup.
 
 ## How it works
 
@@ -97,6 +97,13 @@ Keep reusable workflows in `skills/<name>/SKILL.md` inside the vault. Each folde
 can include scripts, references, binary assets, and client-specific metadata.
 You edit the central files; agents discover and update them over MCP. Git sync
 backs up the complete bundles. omem stores scripts without executing them.
+
+Repository sync runs separately from native skill distribution. Enable Git
+auto-sync with `omem serve --git` or `"git": true` in the saved omem config.
+It commits and pushes vault changes on the watcher's sync ticks. The native
+skills service only updates agent folders. Git sync uses a crash-safe SQLite
+lease on macOS and Windows, and `flock` on Linux. Lock failures report an error;
+only an active competing sync reports `omem sync held`.
 
 Skills use the [Agent Skills format](https://agentskills.io/specification).
 `SKILL.md` must start with YAML containing `name` and `description`. The name must

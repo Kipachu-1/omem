@@ -259,7 +259,7 @@ test('same-vault sync is skipped while another omem sync holds its lease', async
   assert.notEqual(third.skipped, 'omem sync held', 'kernel lease must release with the holder')
 })
 
-test('kernel lease is released after its holder is killed', async () => {
+test('kernel lease is released after its holder is killed', { skip: process.platform !== 'linux' }, async () => {
   const lock = join(vaultA, '.git/omem-sync.lock')
   const holder = spawn('flock', [lock, 'sh', '-c', 'cat >/dev/null'], { stdio: ['pipe', 'ignore', 'ignore'] })
   let sawHeld = false
@@ -322,4 +322,14 @@ test('token env wins over machine credential helpers; no token = machine default
   })
   assert.match(out, /username=x-access-token/)
   assert.match(out, /password=test-pat-42/, 'explicit PAT must be the answering credential')
+})
+
+
+test('lease backend failure returns a failed sync instead of a contention skip', async () => {
+  const lock = join(vaultA, '.git', process.platform === 'linux' ? 'omem-sync.lock' : 'omem-sync.lock.sqlite')
+  mkdirSync(lock)
+  const r = await createGitSync(vaultA)({ pull: true })
+  assert.equal(r.ok, false)
+  assert.equal(r.skipped, undefined)
+  assert.equal(r.committed, 0)
 })

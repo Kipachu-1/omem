@@ -1,5 +1,5 @@
-import { execFile, spawn } from 'node:child_process'
-import { once } from 'node:events'
+import { execFile } from 'node:child_process'
+import { acquireGitLease } from './git-lock.ts'
 import { promisify } from 'node:util'
 import { existsSync, statSync, readFileSync, appendFileSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { resolve, join } from 'node:path'
@@ -88,28 +88,6 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
       return await hasGitProcess()
     } catch {
       return true // unable to inspect processes: preserve the lock
-    }
-  }
-
-  // Kernel-managed advisory lock: flock exits on process death, so SIGKILL cannot strand future sync.
-  const acquireLease = async (): Promise<(() => Promise<void>) | null> => {
-    const lock = await gitPath('omem-sync.lock')
-    const holder = spawn('flock', ['-n', lock, 'sh', '-c', 'echo acquired >&2; cat >/dev/null'], {
-      stdio: ['pipe', 'ignore', 'pipe'],
-    })
-    const acquired = await new Promise<boolean>(resolve => {
-      let stderr = ''
-      holder.stderr.on('data', chunk => {
-        stderr += chunk
-        if (stderr.includes('acquired')) resolve(true)
-      })
-      holder.once('exit', () => resolve(false))
-      holder.once('error', () => resolve(false))
-    })
-    if (!acquired) return null
-    return async () => {
-      holder.stdin.end()
-      await once(holder, 'exit')
     }
   }
 
@@ -250,7 +228,14 @@ export function createGitSync(vault: string, onPulled?: () => void | Promise<voi
       warnOnce('detached', 'omem git: detached HEAD — sync disabled until a branch is checked out')
       return skip('detached HEAD')
     }
-    const releaseLease = await acquireLease()
+    let releaseLease: Awaited<ReturnType<typeof acquireGitLease>>
+    try {
+      releaseLease = await acquireGitLease(await gitPath('omem-sync.lock'))
+    } catch (error) {
+      res.ok = false
+      console.error(`omem git: cannot acquire sync lease (${firstLine(error)})`)
+      return res
+    }
     if (!releaseLease) return skip('omem sync held')
 
     try {
