@@ -1,6 +1,7 @@
 import { test } from 'node:test'
+import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, readlinkSync, existsSync, lstatSync, symlinkSync, renameSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, readlinkSync, existsSync, lstatSync, symlinkSync, renameSync, chmodSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import Database from 'better-sqlite3'
@@ -375,4 +376,84 @@ test('recording a remote connection failure restores an interrupted local bundle
     assert.equal(readFileSync(join(f.target, 'SKILL.md'), 'utf8'), previousBytes)
     assert.equal(getSkillsSyncStatus(options).last?.error, 'could not connect')
   } finally { f.dispose() }
+})
+
+
+test('status reads fresh committed state without write access or SQLite sidecars', { skip: process.platform === 'win32' }, async () => {
+  const f = fixture(); const s = source()
+  try {
+    await syncSkills({ ...f, source: s.instance })
+    const before = readdirSync(f.stateDir).sort()
+    chmodSync(f.stateDir, 0o555)
+    chmodSync(join(f.stateDir, 'skills-sync.db'), 0o444)
+    assert.equal(getSkillsSyncStatus(f).installed[0].revision, bundle().revision)
+    assert.deepEqual(readdirSync(f.stateDir).sort(), before)
+    chmodSync(f.stateDir, 0o755)
+    chmodSync(join(f.stateDir, 'skills-sync.db'), 0o644)
+    s.set([bundle('example', 'Latest')])
+    await syncSkills({ ...f, source: s.instance })
+    chmodSync(f.stateDir, 0o555)
+    chmodSync(join(f.stateDir, 'skills-sync.db'), 0o444)
+    const status = getSkillsSyncStatus(f)
+    assert.equal(status.installed[0].revision, bundle('example', 'Latest').revision)
+    assert.deepEqual((status.last?.result as { updated: string[] }).updated, ['example'])
+    assert.deepEqual(readdirSync(f.stateDir).sort(), before)
+  } finally {
+    chmodSync(f.stateDir, 0o755)
+    f.dispose()
+  }
+})
+
+test('writer migrates existing WAL state and preserves committed WAL updates', async () => {
+  const f = fixture(); const s = source()
+  try {
+    await syncSkills({ ...f, source: s.instance })
+    const database = join(f.stateDir, 'skills-sync.db')
+    // Abrupt exit leaves committed changes in WAL, as an interrupted watcher would.
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import Database from 'better-sqlite3';
+      const db = new Database(process.argv[1]);
+      db.pragma('journal_mode = WAL');
+      db.pragma('wal_autocheckpoint = 0');
+      db.prepare("INSERT INTO sync_meta(key,value) VALUES ('migration-proof','42')").run();
+      process.exit(0);
+    `, database], { encoding: 'utf8' })
+    assert.equal(child.status, 0, child.stderr)
+    assert.ok(existsSync(database + '-wal'))
+    await syncSkills({ ...f, source: s.instance })
+    const db = new Database(database, { readonly: true })
+    try {
+      assert.equal(db.pragma('journal_mode', { simple: true }), 'delete')
+      assert.deepEqual(db.prepare("SELECT value FROM sync_meta WHERE key='migration-proof'").get(), { value: '42' })
+    } finally { db.close() }
+    assert.equal(existsSync(database + '-wal'), false)
+    assert.equal(existsSync(database + '-shm'), false)
+    assert.equal(getSkillsSyncStatus(f).installed.length, 1)
+  } finally { f.dispose() }
+})
+
+
+test('WAL migration preserves state when an existing reader blocks conversion', async () => {
+  const f = fixture(); const s = source()
+  let reader: Database.Database | undefined
+  try {
+    await syncSkills({ ...f, source: s.instance })
+    const database = join(f.stateDir, 'skills-sync.db')
+    reader = new Database(database)
+    reader.pragma('journal_mode = WAL')
+    reader.exec('BEGIN')
+    const snapshot = reader.prepare('SELECT value FROM installed').get()
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { recordSkillsSyncFailure } from './src/skills/sync.ts';
+      recordSkillsSyncFailure({ home: process.argv[1], stateDir: process.argv[2], source: 'local:test', error: 'migration completed' });
+    `, f.home, f.stateDir], { encoding: 'utf8' })
+    assert.equal(child.status, 1)
+    assert.match(child.stderr, /SQLITE_BUSY/)
+    assert.deepEqual(reader.prepare('SELECT value FROM installed').get(), snapshot)
+    assert.equal(reader.pragma('journal_mode', { simple: true }), 'wal')
+    reader.close(); reader = undefined
+    recordSkillsSyncFailure({ ...f, source: 'local:test', error: 'migration completed' })
+    assert.equal(getSkillsSyncStatus(f).last?.error, 'migration completed')
+    assert.equal(existsSync(database + '-wal'), false)
+  } finally { reader?.close(); f.dispose() }
 })

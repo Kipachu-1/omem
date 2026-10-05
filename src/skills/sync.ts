@@ -61,10 +61,12 @@ function identify(db: Database.Database, id: number, allowed: string[], write: b
   if (write) db.pragma(`application_id = ${id}`)
 }
 function schema(db: Database.Database) {
-  identify(db, 0x4f534b53, ['installed', 'sync_meta'], true)
-  db.pragma('journal_mode = WAL')
-  db.pragma('synchronous = FULL')
   db.pragma('busy_timeout = 10000')
+  identify(db, 0x4f534b53, ['installed', 'sync_meta'], true)
+  // Status readers cannot create WAL sidecars in a read-only state directory.
+  // SQLite checkpoints existing WAL commits before switching; the writer mutex serializes migration.
+  db.pragma('journal_mode = DELETE')
+  db.pragma('synchronous = FULL')
   db.exec(`CREATE TABLE IF NOT EXISTS installed (name TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);`)
 }
@@ -194,9 +196,12 @@ export function getSkillsSyncStatus(options: { home?: string; stateDir?: string 
   if (!existsSync(paths.database)) return { installed: [], last: null }
   const db = new Database(paths.database, { readonly: true, fileMustExist: true })
   try {
-    identify(db, 0x4f534b53, ['installed', 'sync_meta'], false)
-    const raw = meta(db, 'last')
-    return { installed: ownership(db), last: raw === undefined ? null : lastSchema.parse(raw) }
+    db.pragma('busy_timeout = 10000')
+    return db.transaction(() => {
+      identify(db, 0x4f534b53, ['installed', 'sync_meta'], false)
+      const raw = meta(db, 'last')
+      return { installed: ownership(db), last: raw === undefined ? null : lastSchema.parse(raw) }
+    })()
   } finally { db.close() }
 }
 function acquireWriter(options: { home?: string; stateDir?: string }) {
